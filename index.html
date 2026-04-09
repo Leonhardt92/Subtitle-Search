@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Subtitle Search</title>
+    <link rel="stylesheet" href="./assets/css/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <nav class="topbar">
+        <a class="brand" href="/">字幕搜索</a>
+        <div class="topbar-links">
+          <a class="topbar-link" href="./admin.html">数据录入</a>
+          <a class="topbar-link" href="./clip-lab.html">Clip Lab</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <section class="search-area">
+          <div class="search-row">
+            <input
+              id="searchInput"
+              type="search"
+              placeholder="Enter search query"
+              autocomplete="off"
+            />
+            <button id="searchHumorButton" type="button" aria-label="Search Humor">搜幽默</button>
+            <button id="searchWritingButton" type="button" aria-label="Search Writing">搜文笔</button>
+            <button id="semanticHumorButton" type="button" aria-label="Semantic Search Humor">语义搜幽默</button>
+            <button id="semanticWritingButton" type="button" aria-label="Semantic Search Writing">语义搜文笔</button>
+          </div>
+        </section>
+
+        <section class="results-area">
+          <h1 id="resultsTitle" class="results-title">Results</h1>
+          <h2 id="summaryText" class="results-summary">正在加载字幕数据...</h2>
+          <div id="resultList" class="result-list" aria-live="polite"></div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./assets/js/app.js"></script>
+  </body>
+</html>

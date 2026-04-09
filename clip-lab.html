@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clip Lab</title>
+    <link rel="stylesheet" href="./assets/css/clip-lab.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <div class="topbar">
+        <h1 class="title">Clip Lab</h1>
+        <div class="note">独立原型页：读现成 clip，拖拽裁画面，直接导出 GIF。</div>
+      </div>
+
+      <div class="layout">
+        <section class="panel">
+          <h2>预览</h2>
+          <div class="field">
+            <label for="srcInput">视频路径 / URL</label>
+            <textarea id="srcInput" rows="3" placeholder="/clips/xxx.mp4"></textarea>
+          </div>
+          <div class="row">
+            <button id="loadButton" type="button">加载视频</button>
+            <button id="fitButton" type="button">裁剪框铺满画面</button>
+          </div>
+          <div class="row" style="margin-top: 10px;">
+            <button id="detectBlackBarsButton" type="button">自动识别黑边</button>
+          </div>
+
+          <div class="preview-shell" id="previewShell">
+            <video id="video" class="video" controls preload="metadata"></video>
+            <div class="overlay" id="overlay">
+              <div class="crop-box" id="cropBox">
+                <div class="handle" id="resizeHandle"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="meta" id="videoMeta">还没加载视频。</div>
+        </section>
+
+        <section class="panel">
+          <h2>导出参数</h2>
+          <div class="row">
+            <div class="field">
+              <label for="startInput">开始秒数</label>
+              <input id="startInput" type="number" min="0" step="0.001" value="0" />
+            </div>
+            <div class="field">
+              <label for="endInput">结束秒数</label>
+              <input id="endInput" type="number" min="0" step="0.001" value="3" />
+            </div>
+          </div>
+
+          <div class="crop-grid">
+            <div class="field">
+              <label for="xInput">X</label>
+              <input id="xInput" type="number" min="0" step="1" value="285" />
+            </div>
+            <div class="field">
+              <label for="yInput">Y</label>
+              <input id="yInput" type="number" min="0" step="1" value="49" />
+            </div>
+            <div class="field">
+              <label for="wInput">宽</label>
+              <input id="wInput" type="number" min="1" step="1" value="1346" />
+            </div>
+            <div class="field">
+              <label for="hInput">高</label>
+              <input id="hInput" type="number" min="1" step="1" value="865" />
+            </div>
+          </div>
+
+          <div class="row">
+            <button id="seekStartButton" type="button">跳到开始时间</button>
+            <button id="useCurrentButton" type="button">当前时间设为开始</button>
+          </div>
+          <div class="row" style="margin-top: 10px;">
+            <button id="seekEndButton" type="button">跳到结束时间</button>
+            <button id="useCurrentEndButton" type="button">当前时间设为结束</button>
+          </div>
+
+          <div class="field" style="margin-top: 12px;">
+            <label>裁剪预览</label>
+            <div class="canvas-wrap">
+              <canvas id="cropCanvas" width="480" height="270"></canvas>
+            </div>
+          </div>
+
+          <div class="row">
+            <button id="exportGifButton" type="button">直接生成 GIF</button>
+          </div>
+
+          <div class="status" id="exportStatus">还没开始导出。</div>
+
+          <div class="hint">
+            用法：
+            1. 把 `http://127.0.0.1:4173/clips/...mp4` 这种地址贴进来
+            2. 拖绿色框选画面区域，或直接改 `x/y/宽/高`
+            3. 调 `开始/结束` 秒数
+            4. 直接生成 GIF 看效果
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script type="module" src="./assets/js/clip-lab.js"></script>
+  </body>
+</html>

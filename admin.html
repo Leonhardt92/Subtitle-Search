@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>数据录入</title>
+    <link rel="stylesheet" href="./assets/css/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <nav class="topbar">
+        <a class="brand" href="/">字幕搜索</a>
+        <div class="topbar-links">
+          <a class="topbar-link" href="./admin.html">数据录入</a>
+        </div>
+      </nav>
+
+      <main class="content admin-content">
+        <section class="admin-panel">
+          <h1 class="results-title">数据录入</h1>
+          <p id="adminSummary" class="results-summary">可先新增视频并自动拿到 `video_id`，也可按 `subtitle_id` 读取并维护字幕。</p>
+
+          <div class="admin-grid">
+            <label class="admin-field">
+              <span>新增视频分类</span>
+              <select id="newVideoCategoryInput">
+                <option value="humor">幽默</option>
+                <option value="writing">文笔</option>
+              </select>
+            </label>
+
+            <label class="admin-field">
+              <span>新增视频标题</span>
+              <input id="newVideoTitleInput" type="text" />
+            </label>
+
+            <label class="admin-field admin-field-wide">
+              <span>sourceUrl 可选</span>
+              <input id="newVideoSourceUrlInput" type="text" />
+            </label>
+          </div>
+
+          <div class="admin-actions">
+            <button id="createVideoButton" type="button">新增视频并同步</button>
+          </div>
+
+          <div class="admin-grid">
+            <label class="admin-field">
+              <span>subtitle_id</span>
+              <div class="admin-inline">
+                <input id="subtitleIdInput" type="number" min="1" />
+                <button id="loadSubtitleButton" type="button">读取</button>
+              </div>
+            </label>
+
+            <label class="admin-field">
+              <span>video_id</span>
+              <input id="videoIdInput" type="number" min="1" required />
+            </label>
+
+            <label class="admin-field">
+              <span>cue_index</span>
+              <input id="cueIndexInput" type="number" min="0" required />
+            </label>
+
+            <label class="admin-field">
+              <span>start_seconds</span>
+              <input id="startSecondsInput" type="number" step="0.001" min="0" required />
+            </label>
+
+            <label class="admin-field">
+              <span>end_seconds</span>
+              <input id="endSecondsInput" type="number" step="0.001" min="0" required />
+            </label>
+
+            <label class="admin-field admin-field-wide">
+              <span>text</span>
+              <textarea id="textInput" rows="4" required></textarea>
+            </label>
+          </div>
+
+          <div class="admin-actions">
+            <button id="saveSubtitleButton" type="button">保存字幕</button>
+            <button id="syncVideoButton" type="button">build-sqlite 同步本视频</button>
+            <button id="generateClipButton" type="button">生成本视频 clip</button>
+            <button id="generateEmbeddingButton" type="button">生成本视频 embedding</button>
+          </div>
+
+          <pre id="adminLog" class="admin-log">等待操作...</pre>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./assets/js/admin.js"></script>
+  </body>
+</html>

@@ -1,0 +1,47 @@
+.DS_Store
+
+# SQLite runtime files
+subtitles.db-shm
+subtitles.db-wal
+
+# Local database backups / temp copies
+*.sqlite-shm
+*.sqlite-wal
+*.db-shm
+*.db-wal
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Node logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Generated clips, exports, and debug output
+clips/
+clip_lab_exports/
+debug_*.json
+
+# Virtual environments
+.venv/
+venv/
+
+# Local runtime logs
+*.log
+
+# Current working database should not be committed
+subtitles.db
+
+# Current working data should not be committed
+data/幽默/
+data/文笔/
+!data/README.md
+
+# Template/example databases can be committed
+!templates/
+!templates/*.db
+!templates/README.md
