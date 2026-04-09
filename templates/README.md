@@ -10,6 +10,12 @@
 
 - 作为空表结构数据库模板
 - 里面保留一条示例视频和一条示例字幕，方便新环境快速确认表结构和字段含义
+- 当前模板已经跟随主项目更新为 vec-only 结构，包含：
+  - `subtitle_fts`
+  - `search_feedback`
+  - `query_groups`
+  - `query_group_terms`
+  - `subtitle_vec_*`
 
 说明：
 

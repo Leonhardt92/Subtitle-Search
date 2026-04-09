@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import hashlib
 import json
 import os
@@ -10,9 +11,12 @@ import subprocess
 import threading
 from io import BytesIO
 from pathlib import Path
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+from sqlite_vec_utils import delete_vec_rows
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -32,6 +36,402 @@ FALLBACK_PAD_SECONDS = 8.0
 MAX_SMART_SEGMENT_SECONDS = 120.0
 SEMANTIC_MIN_SCORE = 0.6
 CLIP_REQUEST_PAD_SECONDS = 1.0
+
+
+def normalize_query(value: str) -> str:
+    return " ".join(str(value or "").strip().split()).lower()
+
+
+def ensure_search_feedback_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_feedback (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          query TEXT NOT NULL,
+          normalized_query TEXT NOT NULL,
+          category TEXT NOT NULL,
+          search_mode TEXT NOT NULL,
+          subtitle_id INTEGER NOT NULL REFERENCES subtitles(id) ON DELETE CASCADE,
+          video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+          rank_index INTEGER,
+          score REAL,
+          feedback TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        DELETE FROM search_feedback
+        WHERE id NOT IN (
+          SELECT MAX(id)
+          FROM search_feedback
+          GROUP BY normalized_query, category, search_mode, subtitle_id, COALESCE(rank_index, -1)
+        )
+        """
+    )
+    connection.execute("DROP INDEX IF EXISTS idx_search_feedback_lookup")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_search_feedback_lookup
+        ON search_feedback(normalized_query, category, search_mode, subtitle_id, rank_index)
+        """
+    )
+
+
+def ensure_query_group_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS query_groups (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          description TEXT,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS query_group_terms (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          group_id INTEGER NOT NULL REFERENCES query_groups(id) ON DELETE CASCADE,
+          term TEXT NOT NULL,
+          weight REAL NOT NULL DEFAULT 1.0,
+          created_at TEXT NOT NULL,
+          UNIQUE(group_id, term)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_query_group_terms_term
+        ON query_group_terms(term)
+        """
+    )
+
+    created_at = datetime.now(timezone.utc).isoformat()
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO query_groups (name, description, created_at)
+        VALUES (?, ?, ?)
+        """,
+        ("praise", "夸赞、认同、点赞相关表达", created_at),
+    )
+    praise_group = connection.execute("SELECT id FROM query_groups WHERE name = ?", ("praise",)).fetchone()
+    if praise_group is None:
+        return
+
+    for term, weight in [
+        ("很棒", 1.0),
+        ("真棒", 0.95),
+        ("厉害", 0.95),
+        ("赞", 0.95),
+        ("点赞", 1.0),
+        ("大拇指", 1.0),
+        ("优秀", 0.85),
+        ("夸", 0.75),
+        ("认可", 0.75),
+        ("牛", 0.8),
+    ]:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO query_group_terms (group_id, term, weight, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(praise_group["id"]), normalize_query(term), weight, created_at),
+        )
+
+
+def load_feedback_counts(
+    connection: sqlite3.Connection,
+    *,
+    normalized_query: str,
+    category: str,
+    search_mode: str,
+) -> dict[int, dict[str, int]]:
+    ensure_search_feedback_schema(connection)
+    rows = connection.execute(
+        """
+        SELECT
+          subtitle_id,
+          SUM(CASE WHEN feedback = 'useful' THEN 1 ELSE 0 END) AS useful_count,
+          SUM(CASE WHEN feedback = 'bad' THEN 1 ELSE 0 END) AS bad_count
+        FROM search_feedback
+        WHERE normalized_query = ?
+          AND category = ?
+          AND search_mode = ?
+        GROUP BY subtitle_id
+        """,
+        (normalized_query, category, search_mode),
+    ).fetchall()
+
+    feedback_by_subtitle: dict[int, dict[str, int]] = {}
+    for row in rows:
+        feedback_by_subtitle[int(row["subtitle_id"])] = {
+            "usefulCount": int(row["useful_count"] or 0),
+            "badCount": int(row["bad_count"] or 0),
+        }
+    return feedback_by_subtitle
+
+
+def load_related_query_terms(connection: sqlite3.Connection, *, normalized_query: str) -> dict[str, float]:
+    ensure_query_group_schema(connection)
+    rows = connection.execute(
+        """
+        SELECT DISTINCT related.term, related.weight
+        FROM query_group_terms base
+        JOIN query_group_terms related ON related.group_id = base.group_id
+        WHERE base.term = ?
+          AND related.term != ?
+        ORDER BY related.weight DESC, related.term
+        """,
+        (normalized_query, normalized_query),
+    ).fetchall()
+
+    related_terms: dict[str, float] = {}
+    for row in rows:
+        term = str(row["term"] or "").strip()
+        if not term:
+            continue
+        related_terms[term] = max(related_terms.get(term, 0.0), float(row["weight"] or 0.0))
+    return related_terms
+
+
+def load_related_feedback_counts(
+    connection: sqlite3.Connection,
+    *,
+    related_terms: dict[str, float],
+    category: str,
+    search_mode: str,
+) -> dict[int, dict[str, float]]:
+    ensure_search_feedback_schema(connection)
+    if not related_terms:
+        return {}
+
+    placeholders = ", ".join("?" for _ in related_terms)
+    rows = connection.execute(
+        f"""
+        SELECT
+          normalized_query,
+          subtitle_id,
+          SUM(CASE WHEN feedback = 'useful' THEN 1 ELSE 0 END) AS useful_count,
+          SUM(CASE WHEN feedback = 'bad' THEN 1 ELSE 0 END) AS bad_count
+        FROM search_feedback
+        WHERE normalized_query IN ({placeholders})
+          AND category = ?
+          AND search_mode = ?
+        GROUP BY normalized_query, subtitle_id
+        """,
+        (*related_terms.keys(), category, search_mode),
+    ).fetchall()
+
+    feedback_by_subtitle: dict[int, dict[str, float]] = {}
+    for row in rows:
+        subtitle_id = int(row["subtitle_id"])
+        weight = float(related_terms.get(str(row["normalized_query"]), 0.0))
+        entry = feedback_by_subtitle.setdefault(subtitle_id, {"usefulCount": 0.0, "badCount": 0.0})
+        entry["usefulCount"] += int(row["useful_count"] or 0) * weight
+        entry["badCount"] += int(row["bad_count"] or 0) * weight
+    return feedback_by_subtitle
+
+
+def load_related_term_candidates(
+    connection: sqlite3.Connection,
+    *,
+    related_terms: dict[str, float],
+    category: str,
+    exclude_query: str,
+    limit: int = 80,
+) -> list[dict]:
+    if not related_terms:
+        return []
+
+    scored_candidates: dict[int, dict] = {}
+    for term, weight in related_terms.items():
+        if not term or term == exclude_query:
+            continue
+
+        rows = connection.execute(
+            """
+            SELECT
+              s.id,
+              s.video_id,
+              s.cue_index,
+              s.start_seconds,
+              s.end_seconds,
+              s.text,
+              v.title AS video_title,
+              v.video_path,
+              (
+                SELECT sp.start_seconds
+                FROM subtitles sp
+                WHERE sp.video_id = s.video_id
+                  AND sp.cue_index = s.cue_index - 1
+              ) AS prev_start_seconds,
+              (
+                SELECT sp.text
+                FROM subtitles sp
+                WHERE sp.video_id = s.video_id
+                  AND sp.cue_index = s.cue_index - 1
+              ) AS prev_text,
+              (
+                SELECT sn.text
+                FROM subtitles sn
+                WHERE sn.video_id = s.video_id
+                  AND sn.cue_index = s.cue_index + 1
+              ) AS next_text
+            FROM subtitles s
+            JOIN videos v ON v.id = s.video_id
+            WHERE v.has_video = 1
+              AND v.has_subtitle = 1
+              AND v.folder_path LIKE ?
+              AND s.text NOT LIKE ?
+              AND s.text LIKE ?
+            ORDER BY s.start_seconds
+            LIMIT 30
+            """,
+            (CATEGORY_PREFIXES[category], f"%{exclude_query}%", f"%{term}%"),
+        ).fetchall()
+
+        for row in rows:
+            subtitle_id = int(row["id"])
+            existing = scored_candidates.get(subtitle_id)
+            base_score = 0.48 + float(weight) * 0.22
+            if existing is not None and float(existing["score"]) >= base_score:
+                continue
+
+            scored_candidates[subtitle_id] = {
+                "id": str(row["id"]),
+                "videoId": int(row["video_id"]),
+                "videoTitle": row["video_title"],
+                "videoPath": row["video_path"],
+                "startSeconds": row["start_seconds"],
+                "endSeconds": row["end_seconds"],
+                "text": row["text"],
+                "prevStartSeconds": row["prev_start_seconds"],
+                "prevText": row["prev_text"] or "",
+                "nextText": row["next_text"] or "",
+                "score": round(base_score, 6),
+                "matchSource": "query-group",
+                "matchedTerm": term,
+            }
+
+    return sorted(
+        scored_candidates.values(),
+        key=lambda item: (float(item.get("score") or 0.0), int(item["videoId"]), float(item["startSeconds"])),
+        reverse=True,
+    )[:limit]
+
+
+def load_feedback_seed_candidates(
+    connection: sqlite3.Connection,
+    *,
+    normalized_query: str,
+    related_terms: dict[str, float],
+    category: str,
+    search_mode: str,
+    limit: int = 40,
+) -> list[dict]:
+    ensure_search_feedback_schema(connection)
+    query_weights = {normalized_query: 1.0, **related_terms}
+    placeholders = ", ".join("?" for _ in query_weights)
+    rows = connection.execute(
+        f"""
+        SELECT
+          sf.normalized_query,
+          sf.subtitle_id,
+          SUM(CASE WHEN sf.feedback = 'useful' THEN 1 ELSE 0 END) AS useful_count,
+          SUM(CASE WHEN sf.feedback = 'bad' THEN 1 ELSE 0 END) AS bad_count,
+          s.video_id,
+          s.cue_index,
+          s.start_seconds,
+          s.end_seconds,
+          s.text,
+          v.title AS video_title,
+          v.video_path,
+          (
+            SELECT sp.start_seconds
+            FROM subtitles sp
+            WHERE sp.video_id = s.video_id
+              AND sp.cue_index = s.cue_index - 1
+          ) AS prev_start_seconds,
+          (
+            SELECT sp.text
+            FROM subtitles sp
+            WHERE sp.video_id = s.video_id
+              AND sp.cue_index = s.cue_index - 1
+          ) AS prev_text,
+          (
+            SELECT sn.text
+            FROM subtitles sn
+            WHERE sn.video_id = s.video_id
+              AND sn.cue_index = s.cue_index + 1
+          ) AS next_text
+        FROM search_feedback sf
+        JOIN subtitles s ON s.id = sf.subtitle_id
+        JOIN videos v ON v.id = s.video_id
+        WHERE sf.normalized_query IN ({placeholders})
+          AND sf.category = ?
+          AND sf.search_mode = ?
+          AND v.has_video = 1
+          AND v.has_subtitle = 1
+          AND v.folder_path LIKE ?
+          AND s.text NOT LIKE ?
+        GROUP BY sf.normalized_query, sf.subtitle_id
+        """,
+        (*query_weights.keys(), category, search_mode, CATEGORY_PREFIXES[category], f"%{normalized_query}%"),
+    ).fetchall()
+
+    scored_candidates: dict[int, dict] = {}
+    for row in rows:
+        feedback_query = str(row["normalized_query"] or "").strip()
+        if not feedback_query or feedback_query == normalized_query:
+            continue
+        useful_count = int(row["useful_count"] or 0)
+        bad_count = int(row["bad_count"] or 0)
+        if useful_count <= bad_count:
+            continue
+
+        query_weight = float(query_weights.get(feedback_query, 0.0))
+        seed_score = 0.42 + query_weight * 0.12 + min(0.28, math.log1p(useful_count) * 0.12)
+        subtitle_id = int(row["subtitle_id"])
+        existing = scored_candidates.get(subtitle_id)
+        if existing is not None and float(existing["score"]) >= seed_score:
+            continue
+
+        scored_candidates[subtitle_id] = {
+            "id": str(row["subtitle_id"]),
+            "videoId": int(row["video_id"]),
+            "videoTitle": row["video_title"],
+            "videoPath": row["video_path"],
+            "startSeconds": row["start_seconds"],
+            "endSeconds": row["end_seconds"],
+            "text": row["text"],
+            "prevStartSeconds": row["prev_start_seconds"],
+            "prevText": row["prev_text"] or "",
+            "nextText": row["next_text"] or "",
+            "score": round(seed_score, 6),
+            "matchSource": "feedback-seed",
+            "matchedTerm": feedback_query,
+        }
+
+    return sorted(
+        scored_candidates.values(),
+        key=lambda item: (float(item.get("score") or 0.0), int(item["videoId"]), float(item["startSeconds"])),
+        reverse=True,
+    )[:limit]
+
+
+def compute_feedback_boost(*, useful_count: int, bad_count: int) -> float:
+    positive = math.log1p(max(0, useful_count))
+    negative = math.log1p(max(0, bad_count))
+    return max(-1.0, min(1.2, positive * 0.25 - negative * 0.18))
+
+
+def compute_related_feedback_boost(*, useful_count: float, bad_count: float) -> float:
+    positive = math.log1p(max(0.0, useful_count))
+    negative = math.log1p(max(0.0, bad_count))
+    return max(-0.45, min(0.55, positive * 0.16 - negative * 0.12))
 
 
 class SemanticSearchWorker:
@@ -113,6 +513,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             self.handle_semantic_search(parsed.query)
             return
 
+        if parsed.path == "/api/search-feedback":
+            self.send_error(HTTPStatus.METHOD_NOT_ALLOWED, "Use POST for search feedback")
+            return
+
         if parsed.path == "/api/clip":
             self.handle_clip(parsed.query)
             return
@@ -148,6 +552,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/clip-lab/export":
             self.handle_clip_lab_export()
+            return
+
+        if parsed.path == "/api/search-feedback":
+            self.handle_search_feedback()
             return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -292,7 +700,217 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             )
             return
 
+        connection = sqlite3.connect(DB_PATH)
+        connection.row_factory = sqlite3.Row
+        try:
+            normalized_query = normalize_query(query)
+            related_terms = load_related_query_terms(
+                connection,
+                normalized_query=normalized_query,
+            )
+            related_term_candidates = load_related_term_candidates(
+                connection,
+                related_terms=related_terms,
+                category=category,
+                exclude_query=normalized_query,
+            )
+            feedback_seed_candidates = load_feedback_seed_candidates(
+                connection,
+                normalized_query=normalized_query,
+                related_terms=related_terms,
+                category=category,
+                search_mode="semantic",
+            )
+            feedback_by_subtitle = load_feedback_counts(
+                connection,
+                normalized_query=normalized_query,
+                category=category,
+                search_mode="semantic",
+            )
+            related_feedback_by_subtitle = load_related_feedback_counts(
+                connection,
+                related_terms=related_terms,
+                category=category,
+                search_mode="semantic",
+            )
+        finally:
+            connection.close()
+
+        combined_records: dict[int, dict] = {}
+        for record in payload.get("records", []):
+            combined_records[int(record["id"])] = dict(record)
+        for record in related_term_candidates:
+            subtitle_id = int(record["id"])
+            existing = combined_records.get(subtitle_id)
+            if existing is None or float(record.get("score") or 0.0) > float(existing.get("score") or 0.0):
+                combined_records[subtitle_id] = dict(record)
+        for record in feedback_seed_candidates:
+            subtitle_id = int(record["id"])
+            existing = combined_records.get(subtitle_id)
+            if existing is None or float(record.get("score") or 0.0) > float(existing.get("score") or 0.0):
+                combined_records[subtitle_id] = dict(record)
+
+        reranked_records = []
+        for record in combined_records.values():
+            subtitle_id = int(record["id"])
+            feedback = feedback_by_subtitle.get(subtitle_id, {"usefulCount": 0, "badCount": 0})
+            related_feedback = related_feedback_by_subtitle.get(
+                subtitle_id,
+                {"usefulCount": 0.0, "badCount": 0.0},
+            )
+            feedback_boost = compute_feedback_boost(
+                useful_count=feedback["usefulCount"],
+                bad_count=feedback["badCount"],
+            )
+            related_feedback_boost = compute_related_feedback_boost(
+                useful_count=related_feedback["usefulCount"],
+                bad_count=related_feedback["badCount"],
+            )
+            reranked_record = dict(record)
+            reranked_record["usefulCount"] = feedback["usefulCount"]
+            reranked_record["badCount"] = feedback["badCount"]
+            reranked_record["relatedUsefulCount"] = related_feedback["usefulCount"]
+            reranked_record["relatedBadCount"] = related_feedback["badCount"]
+            reranked_record["feedbackBoost"] = feedback_boost
+            reranked_record["relatedFeedbackBoost"] = related_feedback_boost
+            reranked_record["rankScore"] = (
+                float(record.get("score") or 0.0) + feedback_boost + related_feedback_boost
+            )
+            reranked_records.append(reranked_record)
+
+        reranked_records.sort(
+            key=lambda item: (float(item.get("rankScore") or 0.0), float(item.get("score") or 0.0)),
+            reverse=True,
+        )
+        payload["relatedTerms"] = sorted(related_terms.keys())
+        payload["records"] = reranked_records[:60]
         self.send_json(payload)
+
+    def handle_search_feedback(self):
+        payload = self.read_json_body()
+        if payload is None:
+            return
+
+        query = str(payload.get("query") or "").strip()
+        category = str(payload.get("category") or "").strip()
+        search_mode = str(payload.get("searchMode") or "").strip()
+        feedback = str(payload.get("feedback") or "").strip()
+
+        try:
+            subtitle_id = int(payload["subtitleId"])
+            video_id = int(payload["videoId"])
+        except (KeyError, TypeError, ValueError):
+            self.send_json({"ok": False, "error": "subtitleId and videoId are required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        rank_index_raw = payload.get("rankIndex")
+        score_raw = payload.get("score")
+        try:
+            rank_index = int(rank_index_raw) if rank_index_raw not in (None, "") else None
+            score = float(score_raw) if score_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            self.send_json({"ok": False, "error": "invalid rankIndex or score"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        if not query:
+            self.send_json({"ok": False, "error": "query is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if category not in CATEGORY_PREFIXES:
+            self.send_json({"ok": False, "error": "invalid category"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if search_mode != "semantic":
+            self.send_json({"ok": False, "error": "only semantic feedback is supported for now"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if feedback not in {"useful", "bad"}:
+            self.send_json({"ok": False, "error": "feedback must be useful or bad"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        connection = sqlite3.connect(DB_PATH)
+        connection.row_factory = sqlite3.Row
+        try:
+            ensure_search_feedback_schema(connection)
+            subtitle_row = connection.execute(
+                """
+                SELECT s.id, s.video_id
+                FROM subtitles s
+                JOIN videos v ON v.id = s.video_id
+                WHERE s.id = ?
+                  AND s.video_id = ?
+                  AND v.folder_path LIKE ?
+                """,
+                (subtitle_id, video_id, CATEGORY_PREFIXES[category]),
+            ).fetchone()
+
+            if subtitle_row is None:
+                self.send_json({"ok": False, "error": "subtitle not found for feedback"}, status=HTTPStatus.NOT_FOUND)
+                return
+
+            connection.execute(
+                """
+                INSERT INTO search_feedback (
+                  query,
+                  normalized_query,
+                  category,
+                  search_mode,
+                  subtitle_id,
+                  video_id,
+                  rank_index,
+                  score,
+                  feedback,
+                  created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(normalized_query, category, search_mode, subtitle_id, rank_index)
+                DO UPDATE SET
+                  query = excluded.query,
+                  video_id = excluded.video_id,
+                  score = excluded.score,
+                  feedback = excluded.feedback,
+                  created_at = excluded.created_at
+                """,
+                (
+                    query,
+                    normalize_query(query),
+                    category,
+                    search_mode,
+                    subtitle_id,
+                    video_id,
+                    rank_index,
+                    score,
+                    feedback,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            connection.commit()
+
+            counts_row = connection.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN feedback = 'useful' THEN 1 ELSE 0 END) AS useful_count,
+                  SUM(CASE WHEN feedback = 'bad' THEN 1 ELSE 0 END) AS bad_count
+                FROM search_feedback
+                WHERE normalized_query = ?
+                  AND category = ?
+                  AND search_mode = ?
+                  AND subtitle_id = ?
+                """,
+                (normalize_query(query), category, search_mode, subtitle_id),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        useful_count = int((counts_row["useful_count"] if counts_row else 0) or 0)
+        bad_count = int((counts_row["bad_count"] if counts_row else 0) or 0)
+        self.send_json(
+            {
+                "ok": True,
+                "query": query,
+                "subtitleId": subtitle_id,
+                "feedback": feedback,
+                "usefulCount": useful_count,
+                "badCount": bad_count,
+            }
+        )
 
     def handle_clip(self, query_string: str):
         params = parse_qs(query_string)
@@ -699,7 +1317,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 )
                 saved_id = int(cursor.lastrowid)
 
-            connection.execute("DELETE FROM subtitle_embeddings WHERE subtitle_id = ?", (saved_id,))
+            delete_vec_rows(connection, [saved_id])
             connection.execute("INSERT INTO subtitle_fts(rowid, text) VALUES (?, ?)", (saved_id, text))
             connection.execute(
                 """
@@ -1179,8 +1797,18 @@ def build_fallback_clip(cue_start: float, cue_end: float) -> tuple[float, float]
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("port", nargs="?", type=int, default=int(os.environ.get("PORT", "4173")))
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     args = parser.parse_args()
     port = args.port
-    server = ThreadingHTTPServer(("0.0.0.0", port), RangeRequestHandler)
-    print(f"Serving on http://127.0.0.1:{port}")
+    host = args.host
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        ensure_search_feedback_schema(connection)
+        ensure_query_group_schema(connection)
+        connection.commit()
+    finally:
+        connection.close()
+    server = ThreadingHTTPServer((host, port), RangeRequestHandler)
+    print(f"Serving on http://{host}:{port}")
     server.serve_forever()

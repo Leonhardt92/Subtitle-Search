@@ -3,17 +3,17 @@
   "private": true,
   "type": "module",
   "scriptNotes": {
-    "build:sqlite": "普通增量同步，更新 videos/subtitles/fts 等数据库内容。",
+    "build:sqlite": "普通增量同步，更新 videos/subtitles/fts/vec 等数据库内容。",
     "build:clips": "智能切分补跑，只处理 clip_processed=0 的视频，并按视频逐条提交。",
     "embed:sqlite": "使用默认 provider 跑字幕 embedding；当前脚本默认是本地 local provider。",
     "embed:sqlite:local": "使用本地 BAAI/bge-small-zh-v1.5 模型补齐缺失 embedding。",
     "serve": "启动本地网页和 API 服务，包含关键词搜索、语义搜索、clip 播放和数据录入页。"
   },
   "scripts": {
-    "build:sqlite": "python3 ./scripts/build-sqlite.py",
-    "build:clips": "python3 ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --commit-every 1",
-    "embed:sqlite": "python3 ./scripts/embed-sqlite.py",
-    "embed:sqlite:local": "python3 ./scripts/embed-sqlite.py --provider local --model BAAI/bge-small-zh-v1.5",
-    "serve": "python3 ./scripts/serve.py"
+    "build:sqlite": ".venv/bin/python ./scripts/build-sqlite.py",
+    "build:clips": ".venv/bin/python ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --commit-every 1",
+    "embed:sqlite": ".venv/bin/python ./scripts/embed-sqlite.py",
+    "embed:sqlite:local": ".venv/bin/python ./scripts/embed-sqlite.py --provider local --model BAAI/bge-small-zh-v1.5",
+    "serve": ".venv/bin/python ./scripts/serve.py"
   }
 }

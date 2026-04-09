@@ -105,7 +105,9 @@ a {
 .result-line-download:hover,
 .result-line-download:focus-visible,
 .result-line-time:hover,
-.result-line-time:focus-visible {
+.result-line-time:focus-visible,
+.result-line-feedback:hover,
+.result-line-feedback:focus-visible {
   background: var(--button-hover);
 }
 
@@ -260,6 +262,40 @@ a {
 
 .result-line-score {
   margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.result-line-feedbacks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.result-line-feedback {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  background: var(--button);
+  cursor: pointer;
+}
+
+.result-line-feedback-bad {
+  color: #7b1d1d;
+}
+
+.result-line-feedback.is-saved {
+  background: #e9f5e8;
+  border-color: #9bb79a;
+}
+
+.result-line-feedback-bad.is-saved {
+  background: #f8e9e9;
+  border-color: #caa6a6;
+}
+
+.result-line-feedback-note {
   color: var(--muted);
   font-size: 13px;
 }

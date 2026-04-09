@@ -18,31 +18,37 @@
 - `videos`
 - `subtitles`
 - `subtitle_fts`
-- `subtitle_embeddings`
+- `subtitle_vec_*`
+- `search_feedback`
+- `query_groups`
+- `query_group_terms`
 - `metadata`
 
 说明：
 
 - `subtitle_fts` 使用 SQLite FTS5 做全文检索
-- `subtitle_embeddings` 用来存每条字幕的 embedding
-- embedding 当前以 `JSON + BLOB + norm` 的形式存储
+- `subtitle_vec_*` 是 `sqlite-vec` 生成的向量索引和内部辅助表，语义搜索优先走这里
+- `search_feedback` 用来记录语义搜索结果上的 `有用 / 很差` 反馈
+- `query_groups` / `query_group_terms` 用来维护相近 query 的词簇
+- embedding 现在直接写入 `sqlite-vec` 虚拟表
 - `videos` 会递归收录 `data/` 下所有视频目录，不再只收“已经有字幕”的目录
 - `subtitles` 会预先保存每条字幕对应的 `clip_start_seconds / clip_end_seconds / clip_mode`
 - `clip_mode` 当前优先按画面切换分段，超过 2 分钟时退回到字幕前后各 1 分钟
 - 只有同时存在视频和 `.srt` 时，才会真正生成智能切分结果
 - `videos.clip_processed = 1` 表示该视频的字幕切分已经计算完成，`0` 表示还没处理完或当前缺少视频/字幕
+- `subtitle_fts_*` 和 `subtitle_vec_*` 下的辅助表都属于扩展内部结构，不要手动删
 
 ## 增量同步
 
 常用命令：
 
 ```bash
-python3 ./scripts/build-sqlite.py --full-rebuild
-python3 ./scripts/build-sqlite.py --folder "data/幽默/某个视频目录"
-python3 ./scripts/build-sqlite.py --video-id 41
-python3 ./scripts/build-sqlite.py --rebuild-clips --video-id 41
-python3 ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips
-python3 ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --max-folders 10
+.venv/bin/python ./scripts/build-sqlite.py --full-rebuild
+.venv/bin/python ./scripts/build-sqlite.py --folder "data/幽默/某个视频目录"
+.venv/bin/python ./scripts/build-sqlite.py --video-id 41
+.venv/bin/python ./scripts/build-sqlite.py --rebuild-clips --video-id 41
+.venv/bin/python ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips
+.venv/bin/python ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --max-folders 10
 ```
 
 参数补充：
@@ -60,19 +66,19 @@ python3 ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --max
 如果只是给旧数据补 clip，不需要全量重建整库，可以直接重算字幕切分：
 
 ```bash
-python3 ./scripts/build-sqlite.py --rebuild-clips --video-id 41 --commit-every 1
+.venv/bin/python ./scripts/build-sqlite.py --rebuild-clips --video-id 41 --commit-every 1
 ```
 
 只补还没处理过的记录：
 
 ```bash
-python3 ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --commit-every 1
+.venv/bin/python ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --commit-every 1
 ```
 
 后台跑整批补齐：
 
 ```bash
-nohup python3 -u ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --commit-every 1 > /tmp/subtitle-search-clip-backfill.log 2>&1 &
+nohup .venv/bin/python -u ./scripts/build-sqlite.py --rebuild-clips --only-unprocessed-clips --commit-every 1 > /tmp/subtitle-search-clip-backfill.log 2>&1 &
 ```
 
 说明：
@@ -92,16 +98,16 @@ OPENAI_API_KEY=你的key npm run embed:sqlite
 本地离线模式：
 
 ```bash
-python3 ./scripts/embed-sqlite.py --provider local --model BAAI/bge-small-zh-v1.5
-python3 ./scripts/embed-sqlite.py --provider local --model BAAI/bge-small-zh-v1.5 --video-id 2
+.venv/bin/python ./scripts/embed-sqlite.py --provider local --model BAAI/bge-small-zh-v1.5
+.venv/bin/python ./scripts/embed-sqlite.py --provider local --model BAAI/bge-small-zh-v1.5 --video-id 2
 ```
 
 其他示例：
 
 ```bash
-python3 ./scripts/embed-sqlite.py --limit 100
-python3 ./scripts/embed-sqlite.py --model text-embedding-3-small
-python3 ./scripts/embed-sqlite.py --force
+.venv/bin/python ./scripts/embed-sqlite.py --limit 100
+.venv/bin/python ./scripts/embed-sqlite.py --model text-embedding-3-small
+.venv/bin/python ./scripts/embed-sqlite.py --force
 ```
 
 注意：
@@ -109,9 +115,12 @@ python3 ./scripts/embed-sqlite.py --force
 - OpenAI 模式需要可用的 API key
 - `--provider local` 可以切到本地离线模型，不走 OpenAI API
 - 本地离线方案当前优先推荐 `BAAI/bge-small-zh-v1.5`
+- 当前语义搜索优先使用 `sqlite-vec`
+- `embed-sqlite.py` 现在直接写 `sqlite-vec`
 - 本地模式首次运行会下载 Hugging Face 模型，需要先安装 `torch` 和 `transformers`
 - 本地模式建议使用 `Python 3.11`
 - 当前验证通过的一组版本是：`torch 2.2.2`、`transformers 4.41.2`、`numpy 1.26.4`
+- `sqlite-vec==0.1.9` 已经加入 [requirements-local.txt](/Users/zhanzz/Subtitle-Search/requirements-local.txt)
 - 这些版本已经整理在 [requirements-local.txt](/Users/zhanzz/Subtitle-Search/requirements-local.txt)
 - 如果 `transformers` 版本过高，可能会出现和 `torch` 不兼容的问题
 - 如果 `numpy` 是 `2.x`，当前这组 `torch` 可能会报兼容性警告或初始化失败
@@ -124,6 +133,37 @@ python3 ./scripts/embed-sqlite.py --force
 python3.11 -m venv .venv
 .venv/bin/pip install -r requirements-local.txt
 ```
+
+## 搜索反馈与 query 词簇
+
+当前语义搜索已经接入两层反馈排序：
+
+- 同 query 反馈
+  - 同一个 query 下，你给某条结果点 `有用 / 很差`
+  - 后续再搜这个 query 时，这条结果会被提升或压低
+- 相近 query 外溢
+  - 如果两个 query 落在同一个 `query_group`
+  - 那么其中一个 query 的正负反馈，也会对另一个 query 产生较弱的排序影响
+
+当前内置了一组 `praise` 词簇，包含这些词：
+
+- `很棒`
+- `真棒`
+- `厉害`
+- `赞`
+- `点赞`
+- `大拇指`
+- `优秀`
+- `夸`
+- `认可`
+- `牛`
+
+当前反馈的幂等规则是：
+
+- 同一个 `normalized_query + category + search_mode + subtitle_id + rank_index`
+- 只会保留一条反馈
+- 同一排名下重复点击不会累计
+- 但同一条结果如果后续升到了新的排名，可以再点一次
 
 ## 常用 SQL
 
@@ -176,4 +216,10 @@ SELECT
 FROM subtitles s
 ORDER BY s.id DESC
 LIMIT 20;
+```
+
+查看 vec 索引数量：
+
+```sql
+SELECT COUNT(*) FROM subtitle_vec_baai_bge_small_zh_v1_5_ad29b19a;
 ```

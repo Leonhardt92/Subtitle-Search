@@ -14,6 +14,7 @@ const state = {
   lastSearchMode: "keyword",
   openPlayers: new Map(),
   expandedVideos: new Set(),
+  feedbackStatus: new Map(),
 };
 
 async function fetchMeta() {
@@ -59,6 +60,23 @@ async function semanticSearchRecords(query, category) {
 
   const data = await response.json();
   return Array.isArray(data.records) ? data.records : [];
+}
+
+async function submitSearchFeedback(payload) {
+  const response = await fetch("./api/search-feedback", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.error || `Failed to save feedback: ${response.status}`);
+  }
+
+  return data;
 }
 
 function escapeHtml(value) {
@@ -191,6 +209,42 @@ function renderResults() {
           const activeClass = openState?.recordId === record.id ? " is-active" : "";
           const clipUrl = `./api/clip?subtitle_id=${encodeURIComponent(record.id)}`;
           const clipLabUrl = `./clip-lab.html?src=${encodeURIComponent(new URL(clipUrl, window.location.href).href)}`;
+          const feedbackKey = `${state.lastSearchMode}:${state.lastCategory}:${state.lastQuery}:${record.id}`;
+          const feedbackState = state.feedbackStatus.get(feedbackKey);
+          const feedbackHtml =
+            state.lastSearchMode === "semantic"
+              ? `
+                <div class="result-line-feedbacks">
+                  <button
+                    class="result-line-feedback${feedbackState?.kind === "useful" ? " is-saved" : ""}"
+                    type="button"
+                    data-feedback-subtitle-id="${record.id}"
+                    data-feedback-video-id="${record.videoId}"
+                    data-feedback-rank-index="${record.rankIndex ?? 0}"
+                    data-feedback-score="${record.score ?? ""}"
+                    data-feedback-kind="useful"
+                  >
+                    有用
+                  </button>
+                  <button
+                    class="result-line-feedback result-line-feedback-bad${feedbackState?.kind === "bad" ? " is-saved" : ""}"
+                    type="button"
+                    data-feedback-subtitle-id="${record.id}"
+                    data-feedback-video-id="${record.videoId}"
+                    data-feedback-rank-index="${record.rankIndex ?? 0}"
+                    data-feedback-score="${record.score ?? ""}"
+                    data-feedback-kind="bad"
+                  >
+                    很差
+                  </button>
+                  ${
+                    feedbackState
+                      ? `<span class="result-line-feedback-note">${escapeHtml(feedbackState.message || "已记录")}</span>`
+                      : ""
+                  }
+                </div>
+              `
+              : "";
 
           return `
             <div class="result-line${activeClass}">
@@ -210,6 +264,7 @@ function renderResults() {
                 <p class="result-line-text">${buildHighlightedHtml(record.text, query)}</p>
                 ${buildContextHtml(record.nextText, query, "result-line-context")}
                 ${record.score != null ? `<p class="result-line-score">相似度 ${Number(record.score).toFixed(3)}</p>` : ""}
+                ${feedbackHtml}
               </div>
             </div>
           `;
@@ -432,6 +487,10 @@ async function runSearch(category, mode = "keyword") {
       mode === "semantic"
         ? await semanticSearchRecords(query, category)
         : await searchRecords(query, category);
+    state.records = state.records.map((record, index) => ({
+      ...record,
+      rankIndex: index,
+    }));
     renderResults();
   } catch (error) {
     console.error(error);
@@ -446,6 +505,44 @@ async function runSearch(category, mode = "keyword") {
 }
 
 resultList.addEventListener("click", (event) => {
+  const feedbackButton = event.target.closest("[data-feedback-subtitle-id]");
+
+  if (feedbackButton) {
+    const subtitleId = feedbackButton.dataset.feedbackSubtitleId;
+    const videoId = feedbackButton.dataset.feedbackVideoId;
+    const kind = feedbackButton.dataset.feedbackKind;
+    const rankIndex = feedbackButton.dataset.feedbackRankIndex;
+    const score = feedbackButton.dataset.feedbackScore;
+    const feedbackKey = `${state.lastSearchMode}:${state.lastCategory}:${state.lastQuery}:${subtitleId}`;
+
+    void (async () => {
+      try {
+        const data = await submitSearchFeedback({
+          query: state.lastQuery,
+          category: state.lastCategory,
+          searchMode: state.lastSearchMode,
+          subtitleId: Number(subtitleId),
+          videoId: Number(videoId),
+          rankIndex: rankIndex === "" ? null : Number(rankIndex),
+          score: score === "" ? null : Number(score),
+          feedback: kind,
+        });
+        const count =
+          kind === "useful"
+            ? `有用 ${Number(data.usefulCount ?? 0)}`
+            : `很差 ${Number(data.badCount ?? 0)}`;
+        state.feedbackStatus.set(feedbackKey, {
+          kind,
+          message: `已记录 · ${count}`,
+        });
+        renderResults();
+      } catch (error) {
+        console.error(error);
+      }
+    })();
+    return;
+  }
+
   const toggleButton = event.target.closest("[data-toggle-video]");
 
   if (toggleButton) {

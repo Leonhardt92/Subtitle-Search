@@ -10,6 +10,8 @@ import sqlite3
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+
+from sqlite_vec_utils import count_vec_rows, delete_vec_rows, drop_vec_tables
 from typing import Iterable
 
 
@@ -401,9 +403,10 @@ def build_clip_ranges(cues: list[dict[str, float | str]], video_path: Path | Non
 def init_db(connection: sqlite3.Connection, *, drop_existing: bool) -> None:
     drop_sql = ""
     if drop_existing:
+        drop_vec_tables(connection)
         drop_sql = """
-        DROP TABLE IF EXISTS subtitle_fts;
         DROP TABLE IF EXISTS subtitle_embeddings;
+        DROP TABLE IF EXISTS subtitle_fts;
         DROP TABLE IF EXISTS subtitles;
         DROP TABLE IF EXISTS videos;
         DROP TABLE IF EXISTS metadata;
@@ -458,20 +461,9 @@ def init_db(connection: sqlite3.Connection, *, drop_existing: bool) -> None:
           tokenize='unicode61'
         );
 
-        CREATE TABLE IF NOT EXISTS subtitle_embeddings (
-          subtitle_id INTEGER PRIMARY KEY REFERENCES subtitles(id) ON DELETE CASCADE,
-          model TEXT NOT NULL,
-          dimensions INTEGER NOT NULL,
-          embedding_json TEXT NOT NULL,
-          embedding_blob BLOB NOT NULL,
-          embedding_norm REAL NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-
         CREATE UNIQUE INDEX IF NOT EXISTS idx_videos_folder_path ON videos (folder_path);
         CREATE INDEX IF NOT EXISTS idx_videos_source_url ON videos (source_url);
         CREATE INDEX IF NOT EXISTS idx_subtitles_video_start ON subtitles (video_id, start_seconds);
-        CREATE INDEX IF NOT EXISTS idx_embeddings_model ON subtitle_embeddings (model);
         """
     )
 
@@ -618,12 +610,15 @@ def delete_video_subtitles(connection: sqlite3.Connection, video_id: int) -> Non
         (video_id,),
     ).fetchall()
 
+    subtitle_ids: list[int] = []
     for subtitle_id, text in existing_rows:
+        subtitle_ids.append(int(subtitle_id))
         connection.execute(
             "INSERT INTO subtitle_fts(subtitle_fts, rowid, text) VALUES('delete', ?, ?)",
             (subtitle_id, text),
         )
 
+    delete_vec_rows(connection, subtitle_ids)
     connection.execute("DELETE FROM subtitles WHERE video_id = ?", (video_id,))
 
 
@@ -819,7 +814,7 @@ def sync_video_folder(
 def update_metadata(connection: sqlite3.Connection) -> tuple[int, int, int]:
     video_count = int(connection.execute("SELECT COUNT(*) FROM videos").fetchone()[0])
     subtitle_count = int(connection.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0])
-    embedding_count = int(connection.execute("SELECT COUNT(*) FROM subtitle_embeddings").fetchone()[0])
+    embedding_count = count_vec_rows(connection)
 
     metadata = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

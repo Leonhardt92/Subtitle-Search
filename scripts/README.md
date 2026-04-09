@@ -16,13 +16,14 @@
 常用命令：
 
 ```bash
-python3 ./scripts/serve.py
-python3 ./scripts/build-sqlite.py --video-id 557 --commit-every 1
-python3 ./scripts/build-sqlite.py --folder "data/幽默/某个视频目录" --commit-every 1
+.venv/bin/python ./scripts/serve.py
+.venv/bin/python ./scripts/build-sqlite.py --video-id 557 --commit-every 1
+.venv/bin/python ./scripts/build-sqlite.py --folder "data/幽默/某个视频目录" --commit-every 1
 .venv/bin/python ./scripts/embed-sqlite.py --provider local --model BAAI/bge-small-zh-v1.5 --video-id 557
 ```
 
 补充：
 
 - `build-sqlite.py` 只在“同时有视频和 `.srt`”时才会真正生成 clip
-- `embed-sqlite.py` 的本地模型模式建议使用仓库根目录 `.venv`
+- `embed-sqlite.py` 现在直接写 `sqlite-vec` 向量表，不再依赖旧的 `subtitle_embeddings`
+- `serve.py`、`build-sqlite.py`、`embed-sqlite.py` 都建议使用仓库根目录 `.venv`

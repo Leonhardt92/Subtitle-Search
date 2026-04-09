@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import math
 import os
 import sqlite3
 import struct
@@ -13,6 +12,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+from sqlite_vec_utils import ensure_vec_table, load_sqlite_vec_extension, quote_identifier, vec_table_exists, vec_table_name
 
 
 ROOT_DIR = Path.cwd()
@@ -64,10 +65,6 @@ def fetch_embeddings(api_key: str, model: str, inputs: list[str]) -> list[list[f
 
 def pack_embedding(values: list[float]) -> bytes:
     return struct.pack(f"<{len(values)}f", *values)
-
-
-def embedding_norm(values: list[float]) -> float:
-    return math.sqrt(sum(value * value for value in values))
 
 
 def load_local_encoder(model_name: str):
@@ -133,26 +130,41 @@ def main() -> None:
 
     connection = sqlite3.connect(Path(args.db))
     connection.row_factory = sqlite3.Row
+    try:
+        load_sqlite_vec_extension(connection)
+    except Exception as error:
+        raise SystemExit(f"sqlite-vec is required for embedding writes: {error}") from error
 
-    query = """
-      SELECT s.id, s.text
-      FROM subtitles s
-      LEFT JOIN subtitle_embeddings e
-        ON e.subtitle_id = s.id
-       AND e.model = ?
-      WHERE (? IS NULL OR s.video_id = ?)
-        AND (? = 1 OR e.subtitle_id IS NULL)
-      ORDER BY s.id
-    """
-    rows = connection.execute(
-        query,
-        (
-            model_name,
-            args.video_id,
-            args.video_id,
-            1 if args.force else 0,
-        ),
-    ).fetchall()
+    vec_table = vec_table_name(model_name)
+    if vec_table_exists(connection, vec_table):
+        quoted_vec_table = quote_identifier(vec_table)
+        query = f"""
+          SELECT s.id, s.text
+          FROM subtitles s
+          LEFT JOIN {quoted_vec_table} vec
+            ON vec.rowid = s.id
+          WHERE (? IS NULL OR s.video_id = ?)
+            AND (? = 1 OR vec.rowid IS NULL)
+          ORDER BY s.id
+        """
+        rows = connection.execute(
+            query,
+            (
+                args.video_id,
+                args.video_id,
+                1 if args.force else 0,
+            ),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT s.id, s.text
+            FROM subtitles s
+            WHERE (? IS NULL OR s.video_id = ?)
+            ORDER BY s.id
+            """,
+            (args.video_id, args.video_id),
+        ).fetchall()
     pending = [(row["id"], row["text"]) for row in rows]
 
     if args.limit is not None:
@@ -174,35 +186,16 @@ def main() -> None:
         now = datetime.now(timezone.utc).isoformat()
 
         for (subtitle_id, _text), vector in zip(batch, embeddings):
+            actual_vec_table = ensure_vec_table(
+                connection,
+                model_name=model_name,
+                dimensions=len(vector),
+            )
+            quoted_vec_table = quote_identifier(actual_vec_table)
+            connection.execute(f"DELETE FROM {quoted_vec_table} WHERE rowid = ?", (subtitle_id,))
             connection.execute(
-                """
-                INSERT INTO subtitle_embeddings (
-                  subtitle_id,
-                  model,
-                  dimensions,
-                  embedding_json,
-                  embedding_blob,
-                  embedding_norm,
-                  updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(subtitle_id) DO UPDATE SET
-                  model = excluded.model,
-                  dimensions = excluded.dimensions,
-                  embedding_json = excluded.embedding_json,
-                  embedding_blob = excluded.embedding_blob,
-                  embedding_norm = excluded.embedding_norm,
-                  updated_at = excluded.updated_at
-                """,
-                (
-                    subtitle_id,
-                    model_name,
-                    len(vector),
-                    json.dumps(vector),
-                    pack_embedding(vector),
-                    embedding_norm(vector),
-                    now,
-                ),
+                f"INSERT INTO {quoted_vec_table}(rowid, embedding) VALUES (?, ?)",
+                (subtitle_id, pack_embedding(vector)),
             )
             updated += 1
 
@@ -215,7 +208,7 @@ def main() -> None:
         VALUES ('embedding_count', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """,
-        (str(connection.execute("SELECT COUNT(*) FROM subtitle_embeddings").fetchone()[0]),),
+        (str(connection.execute(f"SELECT COUNT(*) FROM {quote_identifier(vec_table_name(model_name))}").fetchone()[0]),),
     )
     connection.commit()
     connection.close()
