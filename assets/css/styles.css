@@ -252,6 +252,22 @@ a {
   overflow-wrap: anywhere;
 }
 
+.result-line-copy-id {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: copy;
+  color: inherit;
+  font: inherit;
+}
+
+.result-line-copy-id:hover {
+  opacity: 0.92;
+}
+
 .result-line-context {
   margin: 0;
   color: var(--muted);

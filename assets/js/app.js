@@ -144,9 +144,53 @@ function groupRecordsByVideo(records) {
   }));
 }
 
-function buildVideoPreview(items, query) {
-  const previews = items.slice(0, 2).map((item) => buildHighlightedHtml(item.text, query));
-  return previews.join(" / ");
+function mergeConsecutiveKeywordRecords(items) {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const sorted = [...items].sort((left, right) => {
+    const cueDelta = Number(left.cueIndex ?? 0) - Number(right.cueIndex ?? 0);
+    if (cueDelta !== 0) {
+      return cueDelta;
+    }
+
+    return Number(left.startSeconds ?? 0) - Number(right.startSeconds ?? 0);
+  });
+
+  const segments = [];
+
+  for (const record of sorted) {
+    const lastSegment = segments.at(-1);
+
+    if (
+      lastSegment &&
+      Number.isFinite(record.cueIndex) &&
+      Number(record.cueIndex) <= lastSegment.lastCueIndex + 1
+    ) {
+      lastSegment.records.push(record);
+      lastSegment.lastCueIndex = Number(record.cueIndex);
+      lastSegment.endSeconds = record.endSeconds;
+      lastSegment.nextText = record.nextText || "";
+      continue;
+    }
+
+    segments.push({
+      id: record.id,
+      videoId: record.videoId,
+      videoTitle: record.videoTitle,
+      videoPath: record.videoPath,
+      startSeconds: record.startSeconds,
+      endSeconds: record.endSeconds,
+      prevStartSeconds: record.prevStartSeconds,
+      prevText: record.prevText || "",
+      nextText: record.nextText || "",
+      records: [record],
+      lastCueIndex: Number(record.cueIndex ?? 0),
+    });
+  }
+
+  return segments;
 }
 
 function buildContextHtml(text, query, className) {
@@ -164,6 +208,66 @@ function formatDuration(items) {
 
   const maxEnd = Math.max(...items.map((item) => item.endSeconds ?? item.startSeconds));
   return formatClock(maxEnd);
+}
+
+function buildMergedSegmentHtml(segment, query) {
+  const hitLinesHtml = segment.records
+    .map(
+      (record) => `
+        <button class="result-line-text result-line-copy-id" type="button" data-copy-subtitle-id="${record.id}">
+          ${buildHighlightedHtml(record.text, query)}
+        </button>
+      `,
+    )
+    .join("");
+
+  const mergedNoteHtml =
+    segment.records.length > 1 ? `<p class="result-line-score">连续命中 ${segment.records.length} 句</p>` : "";
+
+  return `
+    ${buildContextHtml(segment.prevText, query, "result-line-context")}
+    ${hitLinesHtml}
+    ${buildContextHtml(segment.nextText, query, "result-line-context")}
+    ${mergedNoteHtml}
+  `;
+}
+
+function buildClipUrl(item) {
+  if (item.records) {
+    const params = new URLSearchParams({
+      video_id: String(item.videoId),
+      start: String(item.startSeconds),
+      end: String(item.endSeconds),
+    });
+    return `./api/clip-range?${params.toString()}`;
+  }
+
+  return `./api/clip?subtitle_id=${encodeURIComponent(item.id)}`;
+}
+
+function showCopiedFeedback(element, subtitleId) {
+  const note = document.createElement("span");
+  note.className = "result-line-feedback-note";
+  note.textContent = `已复制 ID ${subtitleId}`;
+
+  const container = element.closest(".result-line-copy") || element.parentElement;
+  if (!container) {
+    return;
+  }
+
+  const previous = container.querySelector(".result-line-feedback-note.is-copy-note");
+  if (previous) {
+    previous.remove();
+  }
+
+  note.classList.add("is-copy-note");
+  container.appendChild(note);
+
+  window.setTimeout(() => {
+    if (note.isConnected) {
+      note.remove();
+    }
+  }, 1600);
 }
 
 function renderResults() {
@@ -203,13 +307,16 @@ function renderResults() {
     .map((group) => {
       const openState = state.openPlayers.get(group.videoTitle);
       const isExpanded = state.expandedVideos.has(group.videoTitle);
-      const visibleItems = isExpanded ? group.items : group.items.slice(0, 9);
+      const displayItems =
+        state.lastSearchMode === "keyword" ? mergeConsecutiveKeywordRecords(group.items) : group.items;
+      const visibleItems = isExpanded ? displayItems : displayItems.slice(0, 9);
       const matchesHtml = visibleItems
-        .map((record) => {
-          const activeClass = openState?.recordId === record.id ? " is-active" : "";
-          const clipUrl = `./api/clip?subtitle_id=${encodeURIComponent(record.id)}`;
+        .map((item) => {
+          const primaryRecord = item.records ? item.records[0] : item;
+          const activeClass = openState?.recordId === primaryRecord.id ? " is-active" : "";
+          const clipUrl = buildClipUrl(item);
           const clipLabUrl = `./clip-lab.html?src=${encodeURIComponent(new URL(clipUrl, window.location.href).href)}`;
-          const feedbackKey = `${state.lastSearchMode}:${state.lastCategory}:${state.lastQuery}:${record.id}`;
+          const feedbackKey = `${state.lastSearchMode}:${state.lastCategory}:${state.lastQuery}:${primaryRecord.id}`;
           const feedbackState = state.feedbackStatus.get(feedbackKey);
           const feedbackHtml =
             state.lastSearchMode === "semantic"
@@ -218,10 +325,10 @@ function renderResults() {
                   <button
                     class="result-line-feedback${feedbackState?.kind === "useful" ? " is-saved" : ""}"
                     type="button"
-                    data-feedback-subtitle-id="${record.id}"
-                    data-feedback-video-id="${record.videoId}"
-                    data-feedback-rank-index="${record.rankIndex ?? 0}"
-                    data-feedback-score="${record.score ?? ""}"
+                    data-feedback-subtitle-id="${primaryRecord.id}"
+                    data-feedback-video-id="${primaryRecord.videoId}"
+                    data-feedback-rank-index="${primaryRecord.rankIndex ?? 0}"
+                    data-feedback-score="${primaryRecord.score ?? ""}"
                     data-feedback-kind="useful"
                   >
                     有用
@@ -229,10 +336,10 @@ function renderResults() {
                   <button
                     class="result-line-feedback result-line-feedback-bad${feedbackState?.kind === "bad" ? " is-saved" : ""}"
                     type="button"
-                    data-feedback-subtitle-id="${record.id}"
-                    data-feedback-video-id="${record.videoId}"
-                    data-feedback-rank-index="${record.rankIndex ?? 0}"
-                    data-feedback-score="${record.score ?? ""}"
+                    data-feedback-subtitle-id="${primaryRecord.id}"
+                    data-feedback-video-id="${primaryRecord.videoId}"
+                    data-feedback-rank-index="${primaryRecord.rankIndex ?? 0}"
+                    data-feedback-score="${primaryRecord.score ?? ""}"
                     data-feedback-kind="bad"
                   >
                     很差
@@ -249,8 +356,8 @@ function renderResults() {
           return `
             <div class="result-line${activeClass}">
               <div class="result-line-actions">
-                <button class="result-line-time" type="button" data-record-id="${record.id}">
-                  ${formatClock(record.startSeconds)}
+                <button class="result-line-time" type="button" data-record-id="${primaryRecord.id}">
+                  ${formatClock(primaryRecord.startSeconds)}
                 </button>
                 <a class="result-line-download" href="${clipUrl}" target="_blank" rel="noreferrer">
                   Clip
@@ -260,10 +367,18 @@ function renderResults() {
                 </a>
               </div>
               <div class="result-line-copy">
-                ${buildContextHtml(record.prevText, query, "result-line-context")}
-                <p class="result-line-text">${buildHighlightedHtml(record.text, query)}</p>
-                ${buildContextHtml(record.nextText, query, "result-line-context")}
-                ${record.score != null ? `<p class="result-line-score">相似度 ${Number(record.score).toFixed(3)}</p>` : ""}
+                ${
+                  item.records
+                    ? buildMergedSegmentHtml(item, query)
+                    : `
+                      ${buildContextHtml(primaryRecord.prevText, query, "result-line-context")}
+                      <button class="result-line-text result-line-copy-id" type="button" data-copy-subtitle-id="${primaryRecord.id}">
+                        ${buildHighlightedHtml(primaryRecord.text, query)}
+                      </button>
+                      ${buildContextHtml(primaryRecord.nextText, query, "result-line-context")}
+                    `
+                }
+                ${primaryRecord.score != null ? `<p class="result-line-score">相似度 ${Number(primaryRecord.score).toFixed(3)}</p>` : ""}
                 ${feedbackHtml}
               </div>
             </div>
@@ -271,10 +386,10 @@ function renderResults() {
         })
         .join("");
       const toggleHtml =
-        group.items.length > 9
+        displayItems.length > 9
           ? `
             <button class="result-group-toggle" type="button" data-toggle-video="${escapeHtml(group.videoTitle)}">
-              ${isExpanded ? "Show less" : `Show ${group.items.length - 9} more`}
+              ${isExpanded ? "Show less" : `Show ${displayItems.length - 9} more`}
             </button>
           `
           : "";
@@ -282,14 +397,14 @@ function renderResults() {
       return `
         <section class="result-group${openState ? " is-active" : ""}" data-video-title="${escapeHtml(group.videoTitle)}">
           <div class="result-group-header">
-            <button class="result-group-play" type="button" data-record-id="${group.items[0].id}">Play</button>
+            <button class="result-group-play" type="button" data-record-id="${displayItems[0].id}">Play</button>
             <div class="result-group-meta">
               <h3 class="result-group-title">${escapeHtml(group.videoTitle)}</h3>
               <div class="result-group-subtitle">
                 <div>Video ID: ${escapeHtml(String(group.videoId))}</div>
                 <div>Matches: ${group.items.length}</div>
+                ${state.lastSearchMode === "keyword" ? `<div>Segments: ${displayItems.length}</div>` : ""}
                 <div>Duration: ${formatDuration(group.items)}</div>
-                <div>Preview: ${buildVideoPreview(group.items, query)}</div>
               </div>
             </div>
           </div>
@@ -505,6 +620,19 @@ async function runSearch(category, mode = "keyword") {
 }
 
 resultList.addEventListener("click", (event) => {
+  const copyButton = event.target.closest("[data-copy-subtitle-id]");
+  if (copyButton) {
+    const subtitleId = copyButton.dataset.copySubtitleId;
+    if (subtitleId) {
+      void navigator.clipboard.writeText(subtitleId).then(() => {
+        showCopiedFeedback(copyButton, subtitleId);
+      }).catch((error) => {
+        console.error(error);
+      });
+    }
+    return;
+  }
+
   const feedbackButton = event.target.closest("[data-feedback-subtitle-id]");
 
   if (feedbackButton) {

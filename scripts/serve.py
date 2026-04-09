@@ -520,6 +520,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/clip":
             self.handle_clip(parsed.query)
             return
+        if parsed.path == "/api/clip-range":
+            self.handle_clip_range(parsed.query)
+            return
 
         if parsed.path == "/api/subtitle-at":
             self.handle_subtitle_at(parsed.query)
@@ -646,6 +649,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 {
                     "id": str(row["id"]),
                     "videoId": int(row["video_id"]),
+                    "cueIndex": int(row["cue_index"]),
                     "videoTitle": row["video_title"],
                     "videoPath": row["video_path"],
                     "startSeconds": row["start_seconds"],
@@ -922,6 +926,45 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
         try:
             output_path = ensure_clip_file(int(subtitle_id))
+        except FileNotFoundError as error:
+            self.send_json({"ok": False, "error": str(error)}, status=HTTPStatus.NOT_FOUND)
+            return
+        except ValueError as error:
+            self.send_json({"ok": False, "error": str(error)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except RuntimeError as error:
+            self.send_json({"ok": False, "error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        location = "/" + quote(output_path.relative_to(ROOT_DIR).as_posix())
+        self.path = location
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    def handle_clip_range(self, query_string: str):
+        params = parse_qs(query_string)
+        video_id = (params.get("video_id", [""])[0] or "").strip()
+        start = (params.get("start", [""])[0] or "").strip()
+        end = (params.get("end", [""])[0] or "").strip()
+
+        if not video_id.isdigit():
+            self.send_json({"ok": False, "error": "video_id is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            start_seconds = float(start)
+            end_seconds = float(end)
+        except ValueError:
+            self.send_json({"ok": False, "error": "start and end are required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            output_path = ensure_clip_range_file(
+                int(video_id),
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
+            )
         except FileNotFoundError as error:
             self.send_json({"ok": False, "error": str(error)}, status=HTTPStatus.NOT_FOUND)
             return
@@ -1715,6 +1758,81 @@ def ensure_clip_file(subtitle_id: int) -> Path:
     return output_path
 
 
+def ensure_clip_range_file(video_id: int, *, start_seconds: float, end_seconds: float) -> Path:
+    if end_seconds <= start_seconds:
+        raise ValueError("end must be greater than start")
+
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        video = connection.execute(
+            """
+            SELECT id, title, video_path
+            FROM videos
+            WHERE id = ?
+            """,
+            (video_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if video is None:
+        raise FileNotFoundError("video not found")
+
+    video_rel_path = video["video_path"]
+    if not video_rel_path:
+        raise ValueError("video path missing")
+
+    source_video = ROOT_DIR / str(video_rel_path)
+    if not source_video.exists():
+        raise FileNotFoundError("video file not found")
+
+    clip_start = max(0.0, start_seconds)
+    clip_end = max(clip_start + 0.1, end_seconds)
+
+    CLIPS_DIR.mkdir(exist_ok=True)
+    safe_title = sanitize_file_name(video["title"])
+    clip_name = (
+        f"{safe_title}"
+        f"__s{int(clip_start * 1000)}"
+        f"__e{int(clip_end * 1000)}"
+        f"__merged.mp4"
+    )
+    output_path = CLIPS_DIR / clip_name
+
+    if output_path.exists():
+        return output_path
+
+    duration = max(0.1, clip_end - clip_start)
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{clip_start:.3f}",
+        "-i",
+        str(source_video),
+        "-t",
+        f"{duration:.3f}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    result = subprocess.run(command, cwd=str(ROOT_DIR), capture_output=True, text=True)
+    if result.returncode != 0 or not output_path.exists():
+        raise RuntimeError(f"ffmpeg failed to generate clip: {(result.stderr or result.stdout)[-1200:]}")
+    return output_path
+
+
 def resolve_local_media_path(src: str) -> Path | None:
     parsed = urlparse(src)
     if parsed.path == "/api/clip":
@@ -1723,6 +1841,21 @@ def resolve_local_media_path(src: str) -> Path | None:
             return None
         try:
             return ensure_clip_file(int(subtitle_id))
+        except (FileNotFoundError, ValueError, RuntimeError):
+            return None
+    if parsed.path == "/api/clip-range":
+        params = parse_qs(parsed.query)
+        video_id = (params.get("video_id", [""])[0] or "").strip()
+        start = (params.get("start", [""])[0] or "").strip()
+        end = (params.get("end", [""])[0] or "").strip()
+        if not video_id.isdigit():
+            return None
+        try:
+            return ensure_clip_range_file(
+                int(video_id),
+                start_seconds=float(start),
+                end_seconds=float(end),
+            )
         except (FileNotFoundError, ValueError, RuntimeError):
             return None
 
