@@ -6,6 +6,7 @@ import sqlite3
 
 
 def load_sqlite_vec_extension(connection: sqlite3.Connection) -> bool:
+    """Try to load sqlite-vec into the current SQLite connection."""
     try:
         import sqlite_vec  # type: ignore
     except ModuleNotFoundError:
@@ -17,16 +18,19 @@ def load_sqlite_vec_extension(connection: sqlite3.Connection) -> bool:
 
 
 def quote_identifier(value: str) -> str:
+    """Quote an SQLite identifier safely."""
     return '"' + value.replace('"', '""') + '"'
 
 
 def vec_table_name(model_name: str) -> str:
+    """Derive the deterministic vec table name for a model."""
     slug = re.sub(r"[^a-z0-9]+", "_", model_name.lower()).strip("_")
     digest = hashlib.sha1(model_name.encode("utf-8")).hexdigest()[:8]
     return f"subtitle_vec_{slug[:40]}_{digest}"
 
 
 def vec_table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    """Check whether a vec table already exists."""
     row = connection.execute(
         """
         SELECT 1
@@ -41,6 +45,7 @@ def vec_table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
 
 
 def list_vec_tables(connection: sqlite3.Connection) -> list[str]:
+    """List all vec tables managed by this project."""
     rows = connection.execute(
         """
         SELECT name
@@ -55,6 +60,7 @@ def list_vec_tables(connection: sqlite3.Connection) -> list[str]:
 
 
 def delete_vec_rows(connection: sqlite3.Connection, subtitle_ids: list[int]) -> None:
+    """Delete embedding rows for the given subtitle ids."""
     if not subtitle_ids:
         return
 
@@ -74,11 +80,13 @@ def delete_vec_rows(connection: sqlite3.Connection, subtitle_ids: list[int]) -> 
 
 
 def drop_vec_tables(connection: sqlite3.Connection) -> None:
+    """Drop every vec table managed by this project."""
     for table_name in list_vec_tables(connection):
         connection.execute(f"DROP TABLE {quote_identifier(table_name)}")
 
 
 def count_vec_rows(connection: sqlite3.Connection) -> int:
+    """Count all embedding rows across known vec tables."""
     try:
         loaded = load_sqlite_vec_extension(connection)
     except Exception:
@@ -99,6 +107,7 @@ def ensure_vec_table(
     dimensions: int,
     force_rebuild: bool = False,
 ) -> str:
+    """Create the vec table for a model if it does not exist."""
     table_name = vec_table_name(model_name)
     quoted_name = quote_identifier(table_name)
     if force_rebuild and vec_table_exists(connection, table_name):

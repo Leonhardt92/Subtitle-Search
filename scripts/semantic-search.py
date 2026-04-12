@@ -24,16 +24,19 @@ CATEGORY_PREFIXES = {
 
 
 def normalize_query(value: str) -> str:
+    """Normalize a query string for matching and feedback keys."""
     return " ".join(str(value or "").strip().split()).lower()
 
 
 def text_contains_query(text: str, query: str) -> bool:
+    """Check whether a normalized query appears inside normalized text."""
     normalized_query = normalize_query(query)
     normalized_text = normalize_query(text)
     return bool(normalized_query) and normalized_query in normalized_text
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the local semantic search worker."""
     parser = argparse.ArgumentParser(description="Run local semantic subtitle search.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="Path to subtitles.db")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Embedding model name")
@@ -46,6 +49,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_local_encoder(model_name: str):
+    """Load a local transformer encoder for query embeddings."""
     transformers = importlib.import_module("transformers")
     torch = importlib.import_module("torch")
 
@@ -61,6 +65,7 @@ def load_local_encoder(model_name: str):
 
 
 def mean_pool(last_hidden_state, attention_mask, torch_module):
+    """Mean-pool token embeddings using the attention mask."""
     mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
     summed = (last_hidden_state * mask).sum(dim=1)
     counts = mask.sum(dim=1).clamp(min=1e-9)
@@ -68,6 +73,7 @@ def mean_pool(last_hidden_state, attention_mask, torch_module):
 
 
 def encode_query(tokenizer, model, torch_module, device: str, text: str) -> list[float]:
+    """Encode one query into a normalized embedding vector."""
     with torch_module.no_grad():
         encoded = tokenizer(
             [text],
@@ -84,6 +90,7 @@ def encode_query(tokenizer, model, torch_module, device: str, text: str) -> list
 
 
 def distance_to_similarity(distance: float) -> float:
+    """Convert vec0 distance into the project-wide similarity score."""
     return 1.0 - (float(distance) ** 2) / 2.0
 
 
@@ -97,6 +104,7 @@ def run_vec_search(
     limit: int,
     min_score: float,
 ) -> list[dict]:
+    """Run a sqlite-vec backed semantic search query."""
     table_name = vec_table_name(model_name)
     if not vec_table_exists(connection, table_name):
         return []
@@ -184,6 +192,7 @@ def run_search(
     limit: int,
     min_score: float,
 ) -> dict:
+    """Run one semantic search request against the configured database."""
     connection = sqlite3.connect(Path(db_path))
     connection.row_factory = sqlite3.Row
     try:
@@ -227,6 +236,7 @@ def run_search(
 
 
 def serve_stdio(args: argparse.Namespace) -> None:
+    """Serve semantic search requests over stdin/stdout."""
     tokenizer, model, torch_module, device = load_local_encoder(args.model)
     for raw_line in sys.stdin:
         line = raw_line.strip()
@@ -255,6 +265,7 @@ def serve_stdio(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    """Dispatch to either one-shot search or stdio worker mode."""
     args = parse_args()
     if args.serve_stdio:
         serve_stdio(args)

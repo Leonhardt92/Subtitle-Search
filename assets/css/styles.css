@@ -202,6 +202,58 @@ a {
   line-height: 1.5;
 }
 
+.inline-player-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+  flex-wrap: wrap;
+}
+
+.inline-player-clock {
+  min-width: 84px;
+  padding: 5px 8px;
+  border: 0;
+  background: #f8f8f4;
+  color: var(--muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  font: inherit;
+}
+
+.inline-player-step {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.inline-player-clock:hover,
+.inline-player-clock:focus-visible {
+  opacity: 0.8;
+}
+
+.inline-player-step:hover,
+.inline-player-step:focus-visible {
+  opacity: 0.72;
+}
+
+.inline-player-copy-status {
+  min-width: 56px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.inline-player-copy-status.is-error {
+  color: #a33;
+}
+
 .inline-player {
   width: 100%;
   background: black;

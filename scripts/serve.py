@@ -39,10 +39,12 @@ CLIP_REQUEST_PAD_SECONDS = 1.0
 
 
 def normalize_query(value: str) -> str:
+    """Normalize a user query for feedback keys and comparisons."""
     return " ".join(str(value or "").strip().split()).lower()
 
 
 def ensure_search_feedback_schema(connection: sqlite3.Connection) -> None:
+    """Create or migrate the search feedback table."""
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS search_feedback (
@@ -80,6 +82,7 @@ def ensure_search_feedback_schema(connection: sqlite3.Connection) -> None:
 
 
 def ensure_query_group_schema(connection: sqlite3.Connection) -> None:
+    """Create the query group tables and seed the built-in group."""
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS query_groups (
@@ -149,6 +152,7 @@ def load_feedback_counts(
     category: str,
     search_mode: str,
 ) -> dict[int, dict[str, int]]:
+    """Load per-subtitle feedback counts for one query."""
     ensure_search_feedback_schema(connection)
     rows = connection.execute(
         """
@@ -175,6 +179,7 @@ def load_feedback_counts(
 
 
 def load_related_query_terms(connection: sqlite3.Connection, *, normalized_query: str) -> dict[str, float]:
+    """Load related terms from the query-group table."""
     ensure_query_group_schema(connection)
     rows = connection.execute(
         """
@@ -204,6 +209,7 @@ def load_related_feedback_counts(
     category: str,
     search_mode: str,
 ) -> dict[int, dict[str, float]]:
+    """Aggregate feedback counts for related queries."""
     ensure_search_feedback_schema(connection)
     if not related_terms:
         return {}
@@ -243,6 +249,7 @@ def load_related_term_candidates(
     exclude_query: str,
     limit: int = 80,
 ) -> list[dict]:
+    """Find subtitle candidates that match related query-group terms."""
     if not related_terms:
         return []
 
@@ -332,6 +339,7 @@ def load_feedback_seed_candidates(
     search_mode: str,
     limit: int = 40,
 ) -> list[dict]:
+    """Seed semantic search results from positive feedback history."""
     ensure_search_feedback_schema(connection)
     query_weights = {normalized_query: 1.0, **related_terms}
     placeholders = ", ".join("?" for _ in query_weights)
@@ -423,18 +431,21 @@ def load_feedback_seed_candidates(
 
 
 def compute_feedback_boost(*, useful_count: int, bad_count: int) -> float:
+    """Turn direct feedback counts into a ranking boost."""
     positive = math.log1p(max(0, useful_count))
     negative = math.log1p(max(0, bad_count))
     return max(-1.0, min(1.2, positive * 0.25 - negative * 0.18))
 
 
 def compute_related_feedback_boost(*, useful_count: float, bad_count: float) -> float:
+    """Turn related-query feedback counts into a smaller ranking boost."""
     positive = math.log1p(max(0.0, useful_count))
     negative = math.log1p(max(0.0, bad_count))
     return max(-0.45, min(0.55, positive * 0.16 - negative * 0.12))
 
 
 class SemanticSearchWorker:
+    """Manage a long-lived local semantic-search subprocess."""
     def __init__(self) -> None:
         self.process = None
         self.lock = threading.Lock()
@@ -493,6 +504,7 @@ SEMANTIC_WORKER = SemanticSearchWorker()
 
 
 class RangeRequestHandler(SimpleHTTPRequestHandler):
+    """HTTP handler for static assets plus JSON APIs and clip endpoints."""
     range_header_pattern = re.compile(r"bytes=(\d*)-(\d*)$")
 
     def __init__(self, *args, **kwargs):
@@ -1675,11 +1687,13 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
 
 def sanitize_file_name(value: str) -> str:
+    """Convert arbitrary text into a filesystem-safe folder name."""
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", value).strip()
     return cleaned or "clip"
 
 
 def ensure_clip_file(subtitle_id: int) -> Path:
+    """Create or reuse the clip file for one subtitle."""
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     try:
@@ -1759,6 +1773,7 @@ def ensure_clip_file(subtitle_id: int) -> Path:
 
 
 def ensure_clip_range_file(video_id: int, *, start_seconds: float, end_seconds: float) -> Path:
+    """Create or reuse a clip file for an arbitrary time range."""
     if end_seconds <= start_seconds:
         raise ValueError("end must be greater than start")
 
@@ -1834,6 +1849,7 @@ def ensure_clip_range_file(video_id: int, *, start_seconds: float, end_seconds: 
 
 
 def resolve_local_media_path(src: str) -> Path | None:
+    """Resolve a stored media path to an existing local file."""
     parsed = urlparse(src)
     if parsed.path == "/api/clip":
         subtitle_id = (parse_qs(parsed.query).get("subtitle_id", [""])[0] or "").strip()
@@ -1875,6 +1891,7 @@ def resolve_local_media_path(src: str) -> Path | None:
 
 
 def format_srt_timestamp(seconds: float) -> str:
+    """Format seconds as an SRT timestamp string."""
     total_milliseconds = max(0, int(round(seconds * 1000)))
     hours = total_milliseconds // 3_600_000
     remainder = total_milliseconds % 3_600_000
@@ -1886,6 +1903,7 @@ def format_srt_timestamp(seconds: float) -> str:
 
 
 def render_srt(rows) -> str:
+    """Render subtitle rows back into SRT text."""
     blocks = []
     for row_number, row in enumerate(rows, start=1):
         text = str(row["text"] or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -1902,6 +1920,7 @@ def render_srt(rows) -> str:
 
 
 def clamp_clip_window(clip_start: float, clip_end: float, cue_start: float, cue_end: float) -> tuple[float, float]:
+    """Clamp a clip window so it always covers the cue and stays sane."""
     clip_start = max(0.0, min(clip_start, cue_start))
     clip_end = max(cue_end, clip_end)
 
@@ -1919,6 +1938,7 @@ def clamp_clip_window(clip_start: float, clip_end: float, cue_start: float, cue_
 
 
 def build_fallback_clip(cue_start: float, cue_end: float) -> tuple[float, float]:
+    """Build a conservative fallback clip around one subtitle."""
     return clamp_clip_window(
         cue_start - FALLBACK_PAD_SECONDS,
         cue_end + FALLBACK_PAD_SECONDS,

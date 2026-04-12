@@ -11,25 +11,26 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlite_vec_utils import count_vec_rows, delete_vec_rows, drop_vec_tables
+from sqlite_vec_utils import count_vec_rows, delete_vec_rows
 from typing import Iterable
 
 
 ROOT_DIR = Path.cwd()
 DATA_DIR = ROOT_DIR / "data"
 OUTPUT_DB = ROOT_DIR / "subtitles.db"
-SCENE_SCORE_THRESHOLD = 0.18
+SCENE_SCORE_THRESHOLD = 0.16
 MAX_SMART_SEGMENT_SECONDS = 120.0
 FALLBACK_PAD_SECONDS = 8.0
 SCENE_JOIN_EPSILON_SECONDS = 0.05
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for database rebuild and sync jobs."""
     parser = argparse.ArgumentParser(description="Build or incrementally sync subtitles.db from data/.")
     parser.add_argument(
         "--full-rebuild",
         action="store_true",
-        help="Drop and rebuild every table from scratch instead of incrementally syncing changed folders.",
+        help="Rescan and rebuild all folders without deleting existing tables or database files.",
     )
     parser.add_argument(
         "--folder",
@@ -70,6 +71,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def parse_timestamp(value: str) -> float:
+    """Parse one SRT timestamp into seconds."""
     parts = value.split(":")
     if len(parts) != 3:
         return 0.0
@@ -84,6 +86,7 @@ def parse_timestamp(value: str) -> float:
 
 
 def parse_srt(content: str) -> list[dict[str, float | str]]:
+    """Parse SRT text into cue dictionaries."""
     normalized = content.replace("\r", "").strip()
     if not normalized:
         return []
@@ -115,6 +118,7 @@ def parse_srt(content: str) -> list[dict[str, float | str]]:
 
 
 def is_video_folder(folder: Path) -> bool:
+    """Detect whether a directory looks like a video item folder."""
     try:
         entries = list(folder.iterdir())
     except OSError:
@@ -132,6 +136,7 @@ def is_video_folder(folder: Path) -> bool:
 
 
 def collect_video_folders(current_dir: Path) -> list[Path]:
+    """Recursively collect all candidate video folders under a directory."""
     folders: set[Path] = set()
 
     try:
@@ -151,6 +156,7 @@ def collect_video_folders(current_dir: Path) -> list[Path]:
 
 
 def pick_video(entries: Iterable[Path]) -> Path | None:
+    """Pick the preferred video file from a folder's entries."""
     candidates = [entry for entry in entries if entry.is_file() and entry.suffix.lower() in {".mp4", ".webm", ".mov", ".m4v"}]
     preferred_suffixes = [".faststart.mp4", ".web.mp4", ".mp4", ".webm", ".mov", ".m4v"]
 
@@ -162,10 +168,12 @@ def pick_video(entries: Iterable[Path]) -> Path | None:
 
 
 def relative_posix(value: Path) -> str:
+    """Return a repository-relative POSIX path."""
     return value.relative_to(ROOT_DIR).as_posix()
 
 
 def probe_duration(video_path: Path) -> float:
+    """Read the video duration with ffprobe."""
     result = subprocess.run(
         [
             "ffprobe",
@@ -191,6 +199,7 @@ def probe_duration(video_path: Path) -> float:
 
 
 def calculate_file_sha256(path: Path | None) -> str | None:
+    """Calculate the SHA-256 checksum of a file if it exists."""
     if path is None:
         return None
 
@@ -208,6 +217,7 @@ def calculate_file_sha256(path: Path | None) -> str | None:
 
 
 def detect_scene_boundaries(video_path: Path) -> list[float]:
+    """Find scene change timestamps with ffmpeg's scene detector."""
     filter_expr = f"select='gt(scene,{SCENE_SCORE_THRESHOLD})',showinfo"
     result = subprocess.run(
         [
@@ -247,6 +257,7 @@ def clamp_clip_window(
     cue_end: float,
     video_duration: float,
 ) -> tuple[float, float]:
+    """Clamp a clip window around its cue and duration limits."""
     clip_start = max(0.0, min(clip_start, cue_start))
     clip_end = max(cue_end, clip_end)
 
@@ -285,6 +296,7 @@ def clamp_clip_window(
 
 
 def build_fallback_clip(cue_start: float, cue_end: float, video_duration: float) -> tuple[float, float, str]:
+    """Build a conservative clip window when scene detection is unavailable."""
     clip_start, clip_end = clamp_clip_window(
         cue_start - FALLBACK_PAD_SECONDS,
         cue_end + FALLBACK_PAD_SECONDS,
@@ -302,6 +314,7 @@ def expand_scene_window(
     cue_end: float,
     video_duration: float,
 ) -> tuple[float, float] | None:
+    """Expand a scene boundary interval to a valid clip window."""
     left_index = interval_index
     right_index = interval_index + 1
     clip_start = boundaries[left_index]
@@ -313,6 +326,7 @@ def expand_scene_window(
 
 
 def build_clip_ranges(cues: list[dict[str, float | str]], video_path: Path | None) -> list[tuple[float, float, str]]:
+    """Build clip ranges for every subtitle cue in a video."""
     if not cues:
         return []
 
@@ -400,24 +414,13 @@ def build_clip_ranges(cues: list[dict[str, float | str]], video_path: Path | Non
     return ranges
 
 
-def init_db(connection: sqlite3.Connection, *, drop_existing: bool) -> None:
-    drop_sql = ""
-    if drop_existing:
-        drop_vec_tables(connection)
-        drop_sql = """
-        DROP TABLE IF EXISTS subtitle_embeddings;
-        DROP TABLE IF EXISTS subtitle_fts;
-        DROP TABLE IF EXISTS subtitles;
-        DROP TABLE IF EXISTS videos;
-        DROP TABLE IF EXISTS metadata;
-        """
-
+def init_db(connection: sqlite3.Connection) -> None:
+    """Create or migrate the SQLite schema used by the project."""
     connection.executescript(
         f"""
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
-
-        {drop_sql}
+        DROP TABLE IF EXISTS subtitle_terms;
 
         CREATE TABLE IF NOT EXISTS metadata (
           key TEXT PRIMARY KEY,
@@ -468,7 +471,13 @@ def init_db(connection: sqlite3.Connection, *, drop_existing: bool) -> None:
     )
 
     video_columns = {row[1] for row in connection.execute("PRAGMA table_info(videos)")}
-    for column_name in ["video_sha256", "source_mtime_ns", "video_mtime_ns", "srt_mtime_ns", "clip_processed"]:
+    for column_name in [
+        "video_sha256",
+        "source_mtime_ns",
+        "video_mtime_ns",
+        "srt_mtime_ns",
+        "clip_processed",
+    ]:
         if column_name not in video_columns:
             if column_name == "video_sha256":
                 connection.execute("ALTER TABLE videos ADD COLUMN video_sha256 TEXT")
@@ -481,6 +490,7 @@ def init_db(connection: sqlite3.Connection, *, drop_existing: bool) -> None:
 
 
 def resolve_target_folders(requested_folders: list[str]) -> list[Path]:
+    """Resolve user-supplied folder arguments into absolute folders."""
     if not requested_folders:
         return collect_video_folders(DATA_DIR)
 
@@ -496,6 +506,7 @@ def resolve_target_folders(requested_folders: list[str]) -> list[Path]:
 
 
 def resolve_video_id_folders(connection: sqlite3.Connection, requested_video_ids: list[int]) -> list[Path]:
+    """Map video ids back to their owning folders."""
     if not requested_video_ids:
         return []
 
@@ -519,6 +530,7 @@ def filter_unprocessed_clip_folders(
     connection: sqlite3.Connection,
     folders: list[Path],
 ) -> list[Path]:
+    """Filter folders to only those whose clips still need refresh."""
     pending_folder_rows = connection.execute(
         """
         SELECT folder_path
@@ -535,6 +547,7 @@ def count_unprocessed_clip_folders(
     connection: sqlite3.Connection,
     allowed_folders: list[Path] | None = None,
 ) -> int:
+    """Count how many folders still need clip recomputation."""
     if allowed_folders:
         relative_folders = [relative_posix(folder) for folder in allowed_folders]
         placeholders = ",".join("?" for _ in relative_folders)
@@ -565,6 +578,7 @@ def fetch_unprocessed_clip_folder_batch(
     allowed_folders: list[Path] | None = None,
     limit: int = 20,
 ) -> list[Path]:
+    """Fetch a batch of folders whose clips still need recomputation."""
     if allowed_folders:
         relative_folders = [relative_posix(folder) for folder in allowed_folders]
         placeholders = ",".join("?" for _ in relative_folders)
@@ -595,6 +609,7 @@ def fetch_unprocessed_clip_folder_batch(
 
 
 def file_mtime_ns(path: Path | None) -> int:
+    """Read file mtime in nanoseconds, or zero when unavailable."""
     if path is None:
         return 0
 
@@ -604,22 +619,88 @@ def file_mtime_ns(path: Path | None) -> int:
         return 0
 
 
-def delete_video_subtitles(connection: sqlite3.Connection, video_id: int) -> None:
+def refresh_video_clip_ranges_preserving_ids(
+    connection: sqlite3.Connection,
+    video_id: int,
+    cues: list[dict[str, float | str]],
+    clip_ranges: list[tuple[float, float, str]],
+) -> bool:
+    """Recompute clip ranges for an existing video while keeping subtitle ids."""
     existing_rows = connection.execute(
-        "SELECT id, text FROM subtitles WHERE video_id = ? ORDER BY id",
+        """
+        SELECT id, cue_index
+        FROM subtitles
+        WHERE video_id = ?
+        ORDER BY cue_index, id
+        """,
         (video_id,),
     ).fetchall()
 
-    subtitle_ids: list[int] = []
-    for subtitle_id, text in existing_rows:
-        subtitle_ids.append(int(subtitle_id))
+    existing_ids_by_index = {int(row["cue_index"]): int(row["id"]) for row in existing_rows}
+
+    for cue_index, cue in enumerate(cues):
+        subtitle_id = existing_ids_by_index.get(cue_index)
+        if subtitle_id is None:
+            continue
+
+        clip_start, clip_end, clip_mode = clip_ranges[cue_index]
         connection.execute(
-            "INSERT INTO subtitle_fts(subtitle_fts, rowid, text) VALUES('delete', ?, ?)",
-            (subtitle_id, text),
+            """
+            UPDATE subtitles
+            SET start_seconds = ?,
+                end_seconds = ?,
+                clip_start_seconds = ?,
+                clip_end_seconds = ?,
+                clip_mode = ?
+            WHERE id = ?
+            """,
+            (
+                cue["start_seconds"],
+                cue["end_seconds"],
+                clip_start,
+                clip_end,
+                clip_mode,
+                subtitle_id,
+            ),
         )
 
-    delete_vec_rows(connection, subtitle_ids)
-    connection.execute("DELETE FROM subtitles WHERE video_id = ?", (video_id,))
+    existing_indices = {int(row["cue_index"]) for row in existing_rows}
+    missing_indices = [index for index in range(len(cues)) if index not in existing_indices]
+    for cue_index in missing_indices:
+        clip_start, clip_end, clip_mode = clip_ranges[cue_index]
+        cue = cues[cue_index]
+        cursor = connection.execute(
+            """
+            INSERT INTO subtitles (
+              video_id,
+              cue_index,
+              start_seconds,
+              end_seconds,
+              clip_start_seconds,
+              clip_end_seconds,
+              clip_mode,
+              text
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                video_id,
+                cue_index,
+                cue["start_seconds"],
+                cue["end_seconds"],
+                clip_start,
+                clip_end,
+                clip_mode,
+                cue["text"],
+            ),
+        )
+        subtitle_id = int(cursor.lastrowid)
+        connection.execute(
+            "INSERT INTO subtitle_fts(rowid, text) VALUES (?, ?)",
+            (subtitle_id, cue["text"]),
+        )
+
+    return True
 
 
 def sync_video_folder(
@@ -629,6 +710,7 @@ def sync_video_folder(
     force_clip_refresh: bool = False,
     only_unprocessed_clips: bool = False,
 ) -> tuple[bool, int]:
+    """Sync one folder into videos/subtitles/fts and update clip metadata."""
     entries = list(folder.iterdir())
     srt_entry = next((entry for entry in entries if entry.is_file() and entry.suffix.lower() == ".srt"), None)
     video_entry = pick_video(entries)
@@ -770,13 +852,60 @@ def sync_video_folder(
         )
         video_id = int(cursor.lastrowid)
 
-    delete_video_subtitles(connection, video_id)
+    if existing_row and refresh_video_clip_ranges_preserving_ids(connection, video_id, cues, clip_ranges):
+        return True, len(cues)
 
     if not video_entry or not srt_entry:
         return True, 0
 
+    existing_subtitle_rows = connection.execute(
+        """
+        SELECT id, cue_index, text
+        FROM subtitles
+        WHERE video_id = ?
+        ORDER BY cue_index, id
+        """,
+        (video_id,),
+    ).fetchall()
+    existing_by_index = {int(row["cue_index"]): row for row in existing_subtitle_rows}
+
     for cue_index, cue in enumerate(cues):
         clip_start, clip_end, clip_mode = clip_ranges[cue_index]
+        existing_subtitle = existing_by_index.get(cue_index)
+        if existing_subtitle is not None:
+            subtitle_id = int(existing_subtitle["id"])
+            connection.execute(
+                "INSERT INTO subtitle_fts(subtitle_fts, rowid, text) VALUES('delete', ?, ?)",
+                (subtitle_id, existing_subtitle["text"]),
+            )
+            connection.execute(
+                """
+                UPDATE subtitles
+                SET start_seconds = ?,
+                    end_seconds = ?,
+                    clip_start_seconds = ?,
+                    clip_end_seconds = ?,
+                    clip_mode = ?,
+                    text = ?
+                WHERE id = ?
+                """,
+                (
+                    cue["start_seconds"],
+                    cue["end_seconds"],
+                    clip_start,
+                    clip_end,
+                    clip_mode,
+                    cue["text"],
+                    subtitle_id,
+                ),
+            )
+            delete_vec_rows(connection, [subtitle_id])
+            connection.execute(
+                "INSERT INTO subtitle_fts(rowid, text) VALUES (?, ?)",
+                (subtitle_id, cue["text"]),
+            )
+            continue
+
         cursor = connection.execute(
             """
             INSERT INTO subtitles (
@@ -812,6 +941,7 @@ def sync_video_folder(
 
 
 def update_metadata(connection: sqlite3.Connection) -> tuple[int, int, int]:
+    """Store aggregate counts for videos, subtitles, and embeddings."""
     video_count = int(connection.execute("SELECT COUNT(*) FROM videos").fetchone()[0])
     subtitle_count = int(connection.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0])
     embedding_count = count_vec_rows(connection)
@@ -835,18 +965,14 @@ def update_metadata(connection: sqlite3.Connection) -> tuple[int, int, int]:
 
 
 def main() -> None:
+    """Run a database sync or clip refresh job."""
     args = parse_args()
     folders = resolve_target_folders(args.folder)
-
-    if args.full_rebuild:
-        for target in [OUTPUT_DB, OUTPUT_DB.with_name(f"{OUTPUT_DB.name}-wal"), OUTPUT_DB.with_name(f"{OUTPUT_DB.name}-shm")]:
-            if target.exists():
-                target.unlink()
 
     connection = sqlite3.connect(OUTPUT_DB)
     connection.row_factory = sqlite3.Row
 
-    init_db(connection, drop_existing=args.full_rebuild)
+    init_db(connection)
 
     if args.video_id:
         folders = resolve_video_id_folders(connection, args.video_id)

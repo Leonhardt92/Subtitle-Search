@@ -24,6 +24,7 @@ OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for embedding generation."""
     parser = argparse.ArgumentParser(description="Build subtitle embeddings into SQLite.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="Path to subtitles.db")
     parser.add_argument(
@@ -41,6 +42,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def fetch_embeddings(api_key: str, model: str, inputs: list[str]) -> list[list[float]]:
+    """Fetch embeddings from the OpenAI embeddings API."""
     payload = json.dumps({"model": model, "input": inputs}).encode("utf-8")
     request = urllib.request.Request(
         OPENAI_EMBEDDINGS_URL,
@@ -64,10 +66,12 @@ def fetch_embeddings(api_key: str, model: str, inputs: list[str]) -> list[list[f
 
 
 def pack_embedding(values: list[float]) -> bytes:
+    """Pack a float embedding into SQLite's vec0 binary layout."""
     return struct.pack(f"<{len(values)}f", *values)
 
 
 def load_local_encoder(model_name: str):
+    """Load a local Hugging Face encoder for offline embeddings."""
     transformers = importlib.import_module("transformers")
     torch = importlib.import_module("torch")
 
@@ -83,6 +87,7 @@ def load_local_encoder(model_name: str):
 
 
 def mean_pool(last_hidden_state, attention_mask, torch_module):
+    """Mean-pool token embeddings using the attention mask."""
     mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
     summed = (last_hidden_state * mask).sum(dim=1)
     counts = mask.sum(dim=1).clamp(min=1e-9)
@@ -90,10 +95,12 @@ def mean_pool(last_hidden_state, attention_mask, torch_module):
 
 
 def normalize_rows(vectors, torch_module):
+    """L2-normalize a batch of embedding vectors."""
     return torch_module.nn.functional.normalize(vectors, p=2, dim=1)
 
 
 def fetch_local_embeddings(tokenizer, model, torch_module, device: str, inputs: list[str]) -> list[list[float]]:
+    """Encode a batch of texts with a local transformer model."""
     with torch_module.no_grad():
         encoded = tokenizer(
             inputs,
@@ -110,6 +117,7 @@ def fetch_local_embeddings(tokenizer, model, torch_module, device: str, inputs: 
 
 
 def main() -> None:
+    """Run the embedding pipeline and write results into sqlite-vec tables."""
     args = parse_args()
     model_name = args.model or (DEFAULT_LOCAL_MODEL if args.provider == "local" else DEFAULT_OPENAI_MODEL)
     api_key = None

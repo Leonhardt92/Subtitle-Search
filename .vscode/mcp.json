@@ -1,0 +1,11 @@
+{
+	"inputs": [
+		{
+			"id": "POSTMAN_API_KEY",
+			"type": "promptString",
+			"description": "A valid Postman API key.",
+			"password": true
+		}
+	],
+	"servers": {}
+}

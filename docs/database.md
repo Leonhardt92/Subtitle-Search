@@ -53,7 +53,7 @@
 
 参数补充：
 
-- `--full-rebuild`：删库后全量重建
+- `--full-rebuild`：全量扫描并同步所有目录，不会删除现有表或数据库文件
 - `--folder`：只处理指定目录，可重复传入
 - `--video-id`：只处理指定 `videos.id`，可重复传入
 - `--rebuild-clips`：强制重算字幕 clip 区间
@@ -133,6 +133,7 @@ OPENAI_API_KEY=你的key npm run embed:sqlite
 python3.11 -m venv .venv
 .venv/bin/pip install -r requirements-local.txt
 ```
+
 
 ## 搜索反馈与 query 词簇
 

@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /Users/zhanzz/Subtitle-Search && python3 -c \"\ntest_terms = \\['π\\?', '你\\?\\?', 'hello!', '纯中文', 'test\\?', 'π', 'αβγ', '你好吗\\?'\\]\nfor term in test_terms:\n    len_check = len\\(term\\) <= 1\n    punct_check = not all\\(c\\.isalnum\\(\\) or c in '\\\\\\\\u4e00-\\\\\\\\u9fff\\?' for c in term\\)\n    print\\(f'\\{term\\}: 长度=\\{len\\(term\\)\\}, 长度过滤=\\{len_check\\}, 标点过滤=\\{punct_check\\}, 最终过滤=\\{len_check or punct_check\\}'\\)\n\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

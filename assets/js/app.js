@@ -6,6 +6,7 @@ const searchHumorButton = document.querySelector("#searchHumorButton");
 const searchWritingButton = document.querySelector("#searchWritingButton");
 const semanticHumorButton = document.querySelector("#semanticHumorButton");
 const semanticWritingButton = document.querySelector("#semanticWritingButton");
+const PLAYER_STEP_SECONDS = 0.3;
 
 const state = {
   records: [],
@@ -103,6 +104,14 @@ function formatClock(totalSeconds) {
   }
 
   return [minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
+}
+
+function formatSecondsLabel(totalSeconds) {
+  return `${Number(totalSeconds || 0).toFixed(3)}s`;
+}
+
+function formatSecondsCopyValue(totalSeconds) {
+  return Number(totalSeconds || 0).toFixed(3);
 }
 
 function buildHighlightedHtml(text, query) {
@@ -429,32 +438,123 @@ function buildPlayerShell(videoTitle, videoPath) {
     <div class="inline-player-meta"></div>
     <div class="inline-player-actions">
       <button class="result-line-time" type="button" data-open-lab-video="${escapeHtml(videoTitle)}">当前播放进 Lab</button>
+      <button class="inline-player-step" type="button" data-player-step="-${PLAYER_STEP_SECONDS}" title="后退 0.3 秒" aria-label="后退 0.3 秒">⏪</button>
+      <button class="inline-player-step" type="button" data-player-step="${PLAYER_STEP_SECONDS}" title="快进 0.3 秒" aria-label="快进 0.3 秒">⏩</button>
+      <button class="inline-player-clock" type="button" data-copy-player-clock aria-label="点击复制当前秒数" title="点击复制当前秒数" aria-live="off"></button>
+      <span class="inline-player-copy-status" aria-live="polite"></span>
     </div>
     <video class="inline-player" controls preload="metadata" src="${escapeHtml(videoPath)}"></video>
   `;
   return shell;
 }
 
+function updateOpenStateClock(openState) {
+  if (!openState.clockEl) {
+    return;
+  }
+
+  const currentTime = openState.video ? openState.video.currentTime : openState.currentTime;
+  const seconds = Number.isFinite(currentTime) ? currentTime : 0;
+  const label = formatSecondsLabel(seconds);
+  openState.clockEl.textContent = label;
+  openState.clockEl.dataset.copyValue = formatSecondsCopyValue(seconds);
+}
+
+function copyPlayerClock(openState) {
+  if (!openState?.clockEl) {
+    return;
+  }
+
+  const value = openState.clockEl.dataset.copyValue || openState.clockEl.textContent || "";
+  if (!value) {
+    return;
+  }
+
+  const statusEl = openState.copyStatusEl;
+  const setStatus = (message, isError = false) => {
+    if (!statusEl) {
+      return;
+    }
+
+    statusEl.textContent = message;
+    statusEl.classList.toggle("is-error", isError);
+
+    if (openState.copyStatusTimer) {
+      window.clearTimeout(openState.copyStatusTimer);
+    }
+
+    openState.copyStatusTimer = window.setTimeout(() => {
+      if (!openState.copyStatusEl) {
+        return;
+      }
+      openState.copyStatusEl.textContent = "";
+      openState.copyStatusEl.classList.remove("is-error");
+      openState.copyStatusTimer = null;
+    }, 1200);
+  };
+
+  void navigator.clipboard.writeText(value)
+    .then(() => {
+      setStatus("已复制");
+    })
+    .catch((error) => {
+      console.error(error);
+      setStatus("复制失败", true);
+    });
+}
+
+function seekOpenPlayerByDelta(openState, deltaSeconds) {
+  if (!openState) {
+    return;
+  }
+
+  const video = openState.video;
+  const currentTime = Number.isFinite(video?.currentTime)
+    ? video.currentTime
+    : Number.isFinite(openState.currentTime)
+      ? openState.currentTime
+      : 0;
+  const duration = Number.isFinite(video?.duration) ? video.duration : null;
+  const nextTime = duration == null ? Math.max(0, currentTime + deltaSeconds) : Math.min(duration, Math.max(0, currentTime + deltaSeconds));
+
+  openState.currentTime = nextTime;
+  openState.pendingSeek = nextTime;
+
+  if (video && video.readyState >= 1) {
+    video.currentTime = nextTime;
+  }
+
+  updateOpenStateClock(openState);
+}
+
 function attachPlayerHandlers(video, openState) {
   video.addEventListener("loadedmetadata", () => {
     if (openState.pendingSeek == null) {
+      updateOpenStateClock(openState);
       return;
     }
 
     video.currentTime = openState.pendingSeek;
+    updateOpenStateClock(openState);
   });
 
   video.addEventListener("seeked", () => {
     if (openState.pendingSeek == null) {
+      updateOpenStateClock(openState);
       return;
     }
 
     openState.pendingSeek = null;
+    updateOpenStateClock(openState);
 
     if (openState.shouldAutoplayAfterSeek) {
       openState.shouldAutoplayAfterSeek = false;
       void video.play().catch(() => {});
     }
+  });
+
+  video.addEventListener("timeupdate", () => {
+    updateOpenStateClock(openState);
   });
 }
 
@@ -474,8 +574,14 @@ function restoreOpenPlayers() {
 
     const shell = buildPlayerShell(videoTitle, openState.videoPath);
     const meta = shell.querySelector(".inline-player-meta");
+    const clock = shell.querySelector(".inline-player-clock");
+    const copyStatus = shell.querySelector(".inline-player-copy-status");
     const video = shell.querySelector(".inline-player");
     meta.textContent = openState.cueText || "Select a timestamp to jump in this video.";
+    openState.clockEl = clock;
+    openState.copyStatusEl = copyStatus;
+    openState.copyStatusTimer = null;
+    updateOpenStateClock(openState);
     attachPlayerHandlers(video, openState);
     slot.replaceWith(shell);
     openState.video = video;
@@ -485,6 +591,7 @@ function restoreOpenPlayers() {
         "loadedmetadata",
         () => {
           video.currentTime = openState.currentTime;
+          updateOpenStateClock(openState);
           if (!openState.paused) {
             void video.play().catch(() => {});
           }
@@ -523,6 +630,9 @@ function seekInlinePlayer(record) {
       pendingSeek: null,
       shouldAutoplayAfterSeek: false,
       video: null,
+      clockEl: null,
+      copyStatusEl: null,
+      copyStatusTimer: null,
     };
     state.openPlayers.set(record.videoTitle, openState);
   }
@@ -690,6 +800,40 @@ resultList.addEventListener("click", (event) => {
 
   if (openLabButton) {
     void openClipLabForVideo(openLabButton.dataset.openLabVideo);
+    return;
+  }
+
+  const copyClockButton = event.target.closest("[data-copy-player-clock]");
+
+  if (copyClockButton) {
+    const shell = copyClockButton.closest("[data-player-for]");
+    if (!shell) {
+      return;
+    }
+
+    const videoTitle = shell.dataset.playerFor;
+    const openState = state.openPlayers.get(videoTitle);
+    if (openState) {
+      copyPlayerClock(openState);
+    }
+    return;
+  }
+
+  const stepButton = event.target.closest("[data-player-step]");
+
+  if (stepButton) {
+    const shell = stepButton.closest("[data-player-for]");
+    if (!shell) {
+      return;
+    }
+
+    const videoTitle = shell.dataset.playerFor;
+    const openState = state.openPlayers.get(videoTitle);
+    const deltaSeconds = Number(stepButton.dataset.playerStep || 0);
+
+    if (openState && Number.isFinite(deltaSeconds)) {
+      seekOpenPlayerByDelta(openState, deltaSeconds);
+    }
     return;
   }
 
