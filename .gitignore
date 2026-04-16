@@ -1,4 +1,5 @@
 .DS_Store
+._*
 
 # SQLite runtime files
 subtitles.db-shm
@@ -23,12 +24,14 @@ yarn-error.log*
 
 # Generated clips, exports, and debug output
 clips/
+thumbnails/
 clip_lab_exports/
 debug_*.json
 
 # Virtual environments
 .venv/
 venv/
+.vscode/
 
 # Local runtime logs
 *.log

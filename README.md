@@ -6,6 +6,7 @@
 - 支持视频按时间跳转的本地静态服务
 - `subtitles.db` SQLite 数据库
 - `sqlite-vec` 向量索引
+- `thumbnails/` 字幕缩略图缓存
 
 ## 目录结构
 
@@ -16,6 +17,7 @@
 │   └── js/
 ├── data/
 ├── clips/
+├── thumbnails/
 ├── clip_lab_exports/
 ├── index.html
 ├── package.json

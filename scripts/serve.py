@@ -22,6 +22,7 @@ from sqlite_vec_utils import delete_vec_rows
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT_DIR / "subtitles.db"
 CLIPS_DIR = ROOT_DIR / "clips"
+THUMBNAILS_DIR = ROOT_DIR / "thumbnails"
 CLIP_LAB_EXPORTS_DIR = ROOT_DIR / "clip_lab_exports"
 SEMANTIC_SCRIPT = ROOT_DIR / "scripts" / "semantic-search.py"
 SEMANTIC_PYTHON = ROOT_DIR / ".venv" / "bin" / "python"
@@ -535,6 +536,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/clip-range":
             self.handle_clip_range(parsed.query)
             return
+        if parsed.path == "/api/thumbnail":
+            self.handle_thumbnail(parsed.query)
+            return
 
         if parsed.path == "/api/subtitle-at":
             self.handle_subtitle_at(parsed.query)
@@ -977,6 +981,32 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
             )
+        except FileNotFoundError as error:
+            self.send_json({"ok": False, "error": str(error)}, status=HTTPStatus.NOT_FOUND)
+            return
+        except ValueError as error:
+            self.send_json({"ok": False, "error": str(error)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except RuntimeError as error:
+            self.send_json({"ok": False, "error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        location = "/" + quote(output_path.relative_to(ROOT_DIR).as_posix())
+        self.path = location
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    def handle_thumbnail(self, query_string: str):
+        params = parse_qs(query_string)
+        subtitle_id = (params.get("subtitle_id", [""])[0] or "").strip()
+
+        if not subtitle_id.isdigit():
+            self.send_json({"ok": False, "error": "subtitle_id is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            output_path = ensure_thumbnail_file(int(subtitle_id))
         except FileNotFoundError as error:
             self.send_json({"ok": False, "error": str(error)}, status=HTTPStatus.NOT_FOUND)
             return
@@ -1769,6 +1799,87 @@ def ensure_clip_file(subtitle_id: int) -> Path:
     result = subprocess.run(command, cwd=str(ROOT_DIR), capture_output=True, text=True)
     if result.returncode != 0 or not output_path.exists():
         raise RuntimeError(f"ffmpeg failed to generate clip: {(result.stderr or result.stdout)[-1200:]}")
+    return output_path
+
+
+def ensure_thumbnail_file(subtitle_id: int) -> Path:
+    """Create or reuse a cached thumbnail for one subtitle."""
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute(
+            """
+            SELECT
+              s.id,
+              s.start_seconds,
+              s.end_seconds,
+              s.clip_start_seconds,
+              s.clip_end_seconds,
+              v.id AS video_id,
+              v.video_path,
+              v.video_mtime_ns,
+              v.srt_mtime_ns
+            FROM subtitles s
+            JOIN videos v ON v.id = s.video_id
+            WHERE s.id = ?
+            """,
+            (subtitle_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        raise FileNotFoundError("subtitle not found")
+
+    video_rel_path = row["video_path"]
+    if not video_rel_path:
+        raise ValueError("video path missing")
+
+    source_video = ROOT_DIR / str(video_rel_path)
+    if not source_video.exists():
+        raise FileNotFoundError("video file not found")
+
+    clip_start = max(0.0, float(row["clip_start_seconds"] or row["start_seconds"] or 0.0))
+    clip_end = max(clip_start + 0.1, float(row["clip_end_seconds"] or row["end_seconds"] or clip_start + 0.1))
+    clip_duration = max(0.1, clip_end - clip_start)
+    capture_time = clip_start + max(0.15, min(1.0, clip_duration / 2))
+    capture_time = min(max(clip_start, capture_time), clip_end - 0.05)
+
+    THUMBNAILS_DIR.mkdir(exist_ok=True)
+    output_dir = THUMBNAILS_DIR / str(int(row["video_id"]))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_name = (
+        f"{int(row['id'])}"
+        f"__v{int(row['video_mtime_ns'] or 0)}"
+        f"__s{int(row['srt_mtime_ns'] or 0)}.webp"
+    )
+    output_path = output_dir / output_name
+
+    if output_path.exists():
+        return output_path
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{capture_time:.3f}",
+        "-i",
+        str(source_video),
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=480:-1:flags=lanczos",
+        "-c:v",
+        "libwebp",
+        "-q:v",
+        "82",
+        "-compression_level",
+        "6",
+        str(output_path),
+    ]
+    result = subprocess.run(command, cwd=str(ROOT_DIR), capture_output=True, text=True)
+    if result.returncode != 0 or not output_path.exists():
+        raise RuntimeError(f"ffmpeg failed to generate thumbnail: {(result.stderr or result.stdout)[-1200:]}")
     return output_path
 
 
